@@ -1,0 +1,6 @@
+@Fantahelp.API_HostAddress = http://localhost:5118
+
+GET {{Fantahelp.API_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
