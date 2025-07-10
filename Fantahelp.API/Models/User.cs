@@ -4,6 +4,7 @@ public class User
     public required string UserName { get; set; }
     public required string Email { get; set; }
     public required string Password { get; set; }
+    public bool IsFake { get; set; }
 
     // --- Navigation Properties ---
     public ICollection<Team> Teams { get; set; } = new List<Team>();
