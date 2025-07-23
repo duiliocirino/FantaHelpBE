@@ -1,5 +1,6 @@
 using DotNetEnv;
 using Microsoft.EntityFrameworkCore;
+using Fantahelp.API.Services;
 
 Env.Load(); // This loads variables from .env into environment variables
 
@@ -17,14 +18,11 @@ builder.Services.AddDbContext<FantahelpContext>(options =>
 // 4. Add services to the dependency injection container.
 builder.Services.AddOpenApi();
 
+builder.Services.AddScoped<IPlayerService, PlayerService>();
+
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
-
-// *** This is where you register your own services ***
-// For example:
-// builder.Services.AddScoped<IPlayerService, PlayerService>();
-// builder.Services.AddScoped<ITeamSuggestionService, TeamSuggestionService>();
 
 // 5. Build the application.
 var app = builder.Build();
