@@ -36,6 +36,7 @@ public class Player
 
     // ML retrieved properties
     public float ExpectedPerformance { get; set; }
+    public float ExpectedStd { get; set; }
 
     public int ExpectedPrice { get; set; }
 

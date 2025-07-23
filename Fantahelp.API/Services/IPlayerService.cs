@@ -4,5 +4,6 @@ namespace Fantahelp.API.Services
     {
         Task<IEnumerable<Player>> GetAllPlayersAsync();
         Task<Player?> GetPlayerByIdAsync(int id);
+        Task ImportPlayersFromCsvAsync(IEnumerable<PlayerCreateDto> players);
     }
 }

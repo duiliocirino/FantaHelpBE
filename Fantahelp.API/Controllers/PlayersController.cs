@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Fantahelp.API.Services;
+using Fantahelp.API.Utils;
 
 namespace Fantahelp.API.Controllers
 {
@@ -33,6 +34,34 @@ namespace Fantahelp.API.Controllers
                 return NotFound();
             }
             return Ok(player);
+        }
+
+        [HttpPost("import")]
+        public async Task<IActionResult> ImportPlayersFromCsv(IFormFile file)
+        {
+            if (file == null || file.Length == 0)
+            {
+                return BadRequest("No file uploaded.");
+            }
+            if (Path.GetExtension(file.FileName).ToLower() != ".csv")
+            {
+                return BadRequest("Invalid file type. Please upload a CSV file.");
+            }
+
+            try
+            {
+                // 1. Parse the CSV file into a list of DTOs
+                using var stream = file.OpenReadStream();
+                var playerDtos = CsvParser.ParsePlayers(stream);
+                // 2. Call the service to perform the import logic
+                await _playerService.ImportPlayersFromCsvAsync(playerDtos);
+                // 3. Return a success response
+                return Ok("Players imported successfully.");
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
         }
     }
 }
