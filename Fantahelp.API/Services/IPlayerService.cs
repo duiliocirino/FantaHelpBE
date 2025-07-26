@@ -2,8 +2,9 @@ namespace Fantahelp.API.Services
 {
     public interface IPlayerService
     {
-        Task<IEnumerable<Player>> GetAllPlayersAsync();
-        Task<Player?> GetPlayerByIdAsync(int id);
-        Task ImportPlayersFromCsvAsync(IEnumerable<PlayerCreateDto> players);
+        Task<ServiceResult<IEnumerable<Player>>> GetAllPlayersAsync();
+        Task<ServiceResult<IEnumerable<Player>>> GetAllAvailablePlayersAsync(int leagueId);
+        Task<ServiceResult<Player?>> GetPlayerByIdAsync(int id);
+        Task<ServiceResult<bool>> ImportPlayersFromCsvAsync(IEnumerable<PlayerCreateDto> players);
     }
 }

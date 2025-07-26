@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Fantahelp.API.Services;
 using Fantahelp.API.Utils;
+using Microsoft.EntityFrameworkCore.Query.SqlExpressions;
 
 namespace Fantahelp.API.Controllers
 {
@@ -19,21 +20,81 @@ namespace Fantahelp.API.Controllers
         }
 
         [HttpGet]
-        public async Task<ActionResult<IEnumerable<PlayerReadDto>>> GetAllPlayers()
+        public async Task<ActionResult<IEnumerable<PlayerReadDto>?>> GetAllPlayers()
         {
-            var players = await _playerService.GetAllPlayersAsync();
-            return Ok(players);
+            var result = await _playerService.GetAllPlayersAsync();
+            var players = result.Data;
+            if (players == null)
+                return NoContent();
+            var playerDtos = players.Select(p => new PlayerReadDto
+            {
+                Id = p.Id,
+                Name = p.Name,
+                Squad = p.Squad,
+                Role = p.Role,
+                Price = p.Price,
+                Rating = p.Rating,
+                Regularness = p.Regularness,
+                FVM = p.FVM,
+                ExpectedPerformance = p.ExpectedPerformance,
+                ExpectedStd = p.ExpectedStd,
+                ExpectedPrice = p.ExpectedPrice
+            });
+            return Ok(playerDtos);
+        }
+
+        [HttpGet("league/{idLeague}")]
+        public async Task<ActionResult<IEnumerable<PlayerReadDto>?>> GetAllAvailablePlayers(int idLeague)
+        {
+            var result = await _playerService.GetAllAvailablePlayersAsync(idLeague);
+            if (result.Success != true)
+                return NotFound();
+            var players = result.Data;
+            if (players == null)
+                return NoContent();
+            var playerDtos = players.Select(p => new PlayerReadDto
+            {
+                Id = p.Id,
+                Name = p.Name,
+                Squad = p.Squad,
+                Role = p.Role,
+                Price = p.Price,
+                Rating = p.Rating,
+                Regularness = p.Regularness,
+                FVM = p.FVM,
+                ExpectedPerformance = p.ExpectedPerformance,
+                ExpectedStd = p.ExpectedStd,
+                ExpectedPrice = p.ExpectedPrice
+            });
+            return Ok(playerDtos);
         }
 
         [HttpGet("{id}")]
         public async Task<IActionResult> GetPlayerById(int id)
         {
-            var player = await _playerService.GetPlayerByIdAsync(id);
-            if (player == null)
+            var result = await _playerService.GetPlayerByIdAsync(id);
+            if (result.Success == false)
             {
                 return NotFound();
             }
-            return Ok(player);
+            var player = result.Data;
+            if (player == null)
+                return Conflict("This means that there is an error in the service that puts null when it should not.");
+            PlayerReadDto playerDto = new PlayerReadDto
+            {
+                Id = player.Id,
+                Name = player.Name,
+                Squad = player.Squad,
+                Role = player.Role,
+                Price = player.Price,
+                Rating = player.Rating,
+                Regularness = player.Regularness,
+                FVM = player.FVM,
+                ExpectedPerformance = player.ExpectedPerformance,
+                ExpectedStd = player.ExpectedStd,
+                ExpectedPrice = player.ExpectedPrice
+            };
+            return Ok(playerDto);
         }
 
         [HttpPost("import")]
