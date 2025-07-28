@@ -1,0 +1,6 @@
+public class TeamReadDto
+{
+    public required int Id { get; set; }
+    public required string Name { get; set; }
+    public required List<TeamPlayerReadDto> Players { get; set; }
+}
