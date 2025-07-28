@@ -4,13 +4,8 @@ public class Team
 {
     [Key]
     public int Id { get; set; }
-
     [Required]
     public required string Name { get; set; }
-
-    [Required]
-    public required string OwnerName { get; set; }
-
     public int RemainingBudget { get; set; }
 
     // --- Navigation Properties ---
