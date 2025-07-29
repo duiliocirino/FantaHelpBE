@@ -18,14 +18,6 @@ namespace Fantahelp.API.Services
             return ServiceResult<IEnumerable<Player>>.SuccessResult(players);
         }
 
-        public async Task<ServiceResult<IEnumerable<Player>>> GetAllAvailablePlayersAsync(int leagueId)
-        {
-            var players = await _context.Players
-                .Where(p => p.TeamPlayers.All(tp => tp.LeagueId != leagueId))
-                .ToListAsync();
-            return ServiceResult<IEnumerable<Player>>.SuccessResult(players);
-        }
-
         public async Task<ServiceResult<Player?>> GetPlayerByIdAsync(int id)
         {
             // FindAsync is an efficient way to get an entity by its primary key.

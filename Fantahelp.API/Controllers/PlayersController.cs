@@ -43,32 +43,6 @@ namespace Fantahelp.API.Controllers
             return Ok(playerDtos);
         }
 
-        [HttpGet("league/{idLeague}")]
-        public async Task<ActionResult<IEnumerable<PlayerReadDto>?>> GetAllAvailablePlayers(int idLeague)
-        {
-            var result = await _playerService.GetAllAvailablePlayersAsync(idLeague);
-            if (result.Success != true)
-                return NotFound();
-            var players = result.Data;
-            if (players == null)
-                return NoContent();
-            var playerDtos = players.Select(p => new PlayerReadDto
-            {
-                Id = p.Id,
-                Name = p.Name,
-                Squad = p.Squad,
-                Role = p.Role,
-                Price = p.Price,
-                Rating = p.Rating,
-                Regularness = p.Regularness,
-                FVM = p.FVM,
-                ExpectedPerformance = p.ExpectedPerformance,
-                ExpectedStd = p.ExpectedStd,
-                ExpectedPrice = p.ExpectedPrice
-            });
-            return Ok(playerDtos);
-        }
-
         [HttpGet("{id}")]
         public async Task<IActionResult> GetPlayerById(int id)
         {
