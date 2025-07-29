@@ -24,17 +24,7 @@ namespace Fantahelp.API.Controllers
             if (teams == null)
                 return NoContent();
 
-            var teamDtos = teams.Select(t => new TeamReadDto
-            {
-                Id = t.Id,
-                Name = t.Name,
-                Players = [.. t.Players.Select(tp => new TeamPlayerReadDto
-                {
-                    PlayerId = tp.PlayerId,
-                    PlayerName = tp.Player.Name,
-                    AuctionPrice = tp.AuctionPrice
-                })]
-            });
+            var teamDtos = teams.Select(t => TeamMapper.ToReadDto(t));
 
             return Ok(teamDtos);
         }
@@ -48,17 +38,9 @@ namespace Fantahelp.API.Controllers
             if (team == null)
                 return NoContent();
 
-            return Ok(new TeamReadDto
-            {
-                Id = team.Id,
-                Name = team.Name,
-                Players = [.. team.Players.Select(tp => new TeamPlayerReadDto
-                {
-                    PlayerId = tp.PlayerId,
-                    PlayerName = tp.Player.Name,
-                    AuctionPrice = tp.AuctionPrice
-                })]
-            });
+            var teamReadDto = TeamMapper.ToReadDto(team);
+
+            return Ok(teamReadDto);
         }
 
         [HttpPost]
@@ -71,17 +53,7 @@ namespace Fantahelp.API.Controllers
 
             var team = result.Data;
 
-            var teamReadDto = new TeamReadDto
-            {
-                Id = team.Id,
-                Name = team.Name,
-                Players = [.. team.Players.Select(tp => new TeamPlayerReadDto
-                {
-                    PlayerId = tp.PlayerId,
-                    PlayerName = tp.Player.Name,
-                    AuctionPrice = tp.AuctionPrice
-                })]
-            };
+            var teamReadDto = TeamMapper.ToReadDto(team);
 
             return CreatedAtAction(nameof(GetTeamById), new { id = team.Id }, teamReadDto);
         }
@@ -107,17 +79,7 @@ namespace Fantahelp.API.Controllers
 
             var team = result.Data;
 
-            var teamReadDto = new TeamReadDto
-            {
-                Id = team.Id,
-                Name = team.Name,
-                Players = [.. team.Players.Select(tp => new TeamPlayerReadDto
-                {
-                    PlayerId = tp.PlayerId,
-                    PlayerName = tp.Player.Name,
-                    AuctionPrice = tp.AuctionPrice
-                })]
-            };
+            var teamReadDto = TeamMapper.ToReadDto(team);
 
             return Ok(teamReadDto);
         }
@@ -132,17 +94,7 @@ namespace Fantahelp.API.Controllers
 
             var team = result.Data;
 
-            var teamReadDto = new TeamReadDto
-            {
-                Id = team.Id,
-                Name = team.Name,
-                Players = [.. team.Players.Select(tp => new TeamPlayerReadDto
-                {
-                    PlayerId = tp.PlayerId,
-                    PlayerName = tp.Player.Name,
-                    AuctionPrice = tp.AuctionPrice
-                })]
-            };
+            var teamReadDto = TeamMapper.ToReadDto(team);
 
             return Ok(teamReadDto);
         }
