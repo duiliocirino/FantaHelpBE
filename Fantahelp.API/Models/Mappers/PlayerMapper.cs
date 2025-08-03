@@ -1,0 +1,25 @@
+public static class PlayerMapper
+{
+    public static PlayerReadDto ToReadDto(Player player)
+    {
+        return new PlayerReadDto
+            {
+                Id = player.Id,
+                Name = player.Name,
+                Squad = player.Squad,
+                Role = player.Role,
+                Price = player.Price,
+                Rating = player.Rating,
+                Regularness = player.Regularness,
+                FVM = player.FVM,
+                ExpectedPerformance = player.ExpectedPerformance,
+                ExpectedStd = player.ExpectedStd,
+                ExpectedPrice = player.ExpectedPrice
+            };
+    }
+
+    public static List<PlayerReadDto> ToReadDtos(IEnumerable<Player> players)
+    {
+        return players.Select(ToReadDto).ToList();
+    }
+}
