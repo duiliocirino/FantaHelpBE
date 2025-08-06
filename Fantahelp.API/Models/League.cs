@@ -5,6 +5,8 @@ public class League
 
     public int InitialBudget { get; set; } = 800;
 
+    public bool GoalBonusPerRole { get; set; } = true;
+
     // --- Navigation Properties ---
     public ICollection<Team> Teams { get; set; } = new List<Team>();
 }
