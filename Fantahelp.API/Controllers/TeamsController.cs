@@ -9,10 +9,12 @@ namespace Fantahelp.API.Controllers
     public class TeamsController : ControllerBase
     {
         private readonly ITeamService _teamService;
+        private readonly ITeamSuggestionService _teamSuggestionService;
 
-        public TeamsController(ITeamService teamService)
+        public TeamsController(ITeamService teamService, ITeamSuggestionService teamSuggestionService)
         {
             _teamService = teamService;
+            _teamSuggestionService = teamSuggestionService;
         }
 
         [HttpGet]
@@ -97,6 +99,19 @@ namespace Fantahelp.API.Controllers
             var teamReadDto = TeamMapper.ToReadDto(team);
 
             return Ok(teamReadDto);
+        }
+
+        [HttpPost("getOptimal")]
+        public async Task<ActionResult<List<SuggestionResult>>> GetOptimalTeamSuggestion([FromBody] SuggestionRequest suggestionRequest)
+        {
+            var result = await _teamSuggestionService.GetOptimalTeamSuggestionAsync(suggestionRequest);
+
+            if (!result.Success || result.Data == null)
+                return BadRequest(result.ErrorMessage);
+
+            var teams = result.Data;
+
+            return Ok(teams);
         }
     }
 }
