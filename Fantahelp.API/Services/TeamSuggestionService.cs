@@ -170,45 +170,45 @@ namespace Fantahelp.API.Services
                     players:    availablePlayersByRole["P"],
                     slots:      playersToBuy["P"],
                     maxBudget:  maxBudgetsPerRole["P"],
-                    lineUp:     suggestionRequest.LineUp,
+                    suggestionRequest:  suggestionRequest,
                     league:     team.League)),
                 Task.Run(() => PrecomputeRoleValues(
                     players:    availablePlayersByRole["D"],
                     slots:      playersToBuy["D"],
                     maxBudget:  maxBudgetsPerRole["D"],
-                    lineUp:     suggestionRequest.LineUp,
+                    suggestionRequest:  suggestionRequest,
                     league:     team.League)),
                 Task.Run(() => PrecomputeRoleValues(
                     players:    availablePlayersByRole["C"],
                     slots:      playersToBuy["C"],
                     maxBudget:  maxBudgetsPerRole["C"],
-                    lineUp:     suggestionRequest.LineUp,
+                    suggestionRequest:  suggestionRequest,
                     league:     team.League)),
                 Task.Run(() => PrecomputeRoleValues(
                     players:    availablePlayersByRole["A"],
                     slots:      playersToBuy["A"],
                     maxBudget:  maxBudgetsPerRole["A"],
-                    lineUp:     suggestionRequest.LineUp,
+                    suggestionRequest:  suggestionRequest,
                     league:     team.League))
             };
 
             var results = await Task.WhenAll(stage1Tasks);
 
             var goalkeeperValues = results[0];
-            Console.WriteLine("Goalkeeper values precomputed.");
-            PrintTopExamples(goalkeeperValues, "Goalkeeper", playersToBuy["P"], playerLookup);
+            //Console.WriteLine("Goalkeeper values precomputed.");
+            //PrintTopExamples(goalkeeperValues, "Goalkeeper", playersToBuy["P"], playerLookup);
 
             var defenderValues = results[1];
-            Console.WriteLine("Defender values precomputed.");
-            PrintTopExamples(defenderValues, "Defender", playersToBuy["D"], playerLookup);
+            //Console.WriteLine("Defender values precomputed.");
+            //PrintTopExamples(defenderValues, "Defender", playersToBuy["D"], playerLookup);
 
             var midfielderValues = results[2];
-            Console.WriteLine("Midfielder values precomputed.");
-            PrintTopExamples(midfielderValues, "Midfielder", playersToBuy["C"], playerLookup);
+            //Console.WriteLine("Midfielder values precomputed.");
+            //PrintTopExamples(midfielderValues, "Midfielder", playersToBuy["C"], playerLookup);
 
             var attackerValues = results[3];
-            Console.WriteLine("Attacker values precomputed.");
-            PrintTopExamples(attackerValues, "Attacker", playersToBuy["A"], playerLookup);
+            //Console.WriteLine("Attacker values precomputed.");
+            //PrintTopExamples(attackerValues, "Attacker", playersToBuy["A"], playerLookup);
 
             // --- STAGE 2: FINAL COMBINATION ---
             Console.WriteLine("Stage 2: Final combination started.");
@@ -217,7 +217,7 @@ namespace Fantahelp.API.Services
                 currentPlayers:     currentPlayers,
                 playersToBuy:       playersToBuy,
                 totalBudget:        team.RemainingBudget,
-                lineUp:             suggestionRequest.LineUp,
+                suggestionRequest:  suggestionRequest,
                 playerLookup:       playerLookup,
                 league:             team.League
             );
@@ -256,7 +256,7 @@ namespace Fantahelp.API.Services
             }
             Console.WriteLine($"--- End {roleName} Top Score Examples ---");
         }
-        private Score CalculateScore(List<Player> players, LineUp lineUp, League league)
+        private Score CalculateScore(List<Player> players, SuggestionRequest suggestionRequest, League league)
         {
             var playersByRole = players
                 .GroupBy(p => p.Role)
@@ -273,9 +273,9 @@ namespace Fantahelp.API.Services
                 int starterCount = role switch
                 {
                     "P" => 1,
-                    "D" => lineUp.Defenders,
-                    "C" => lineUp.Midfielders,
-                    "A" => lineUp.Attackers,
+                    "D" => suggestionRequest.LineUp.Defenders,
+                    "C" => suggestionRequest.LineUp.Midfielders,
+                    "A" => suggestionRequest.LineUp.Attackers,
                     _ => 0
                 };
 
@@ -291,9 +291,9 @@ namespace Fantahelp.API.Services
                 }
             }
 
-            double startingScore = ComputeStarterContribution(starters, lineUp);
+            double startingScore = ComputeStarterContribution(starters, suggestionRequest.LineUp);
             double subsScore = ComputeSubContribution(subs, starters);
-            double strategyScore = ComputeStrategiesScore(starters, subs, league);
+            double strategyScore = ComputeStrategiesScore(starters, subs, league, suggestionRequest);
 
             return new Score
             {
@@ -355,16 +355,42 @@ namespace Fantahelp.API.Services
             return sumRatio;
         }
 
-        private double ComputeStrategiesScore(List<Player> starters, List<Player> subs, League league)
+        private double ComputeStrategiesScore(List<Player> starters, List<Player> subs,
+            League league, SuggestionRequest suggestionRequest)
         {
             double strategyScore = 0;
+            double startersSpreadCreditsScore = 0;
             double goalBonusPerRole = 0;
             double regularnessStartersScore = 0;
             double regularnessSubsScore = 0;
             double mateScore = 0;
             double sameTeamScore = 0;
 
-            // --- Goal Bonuses Per Role ---
+            var allPlayers = starters.Concat(subs).ToList();
+
+            /*                          --- Spread Credits ---
+            This is done in order to make the variance of the expected performance be lower.
+            The impact of this score will try to spread the credits over more players instead
+            of centralising the credits on fewer instances, based on the intensity wanted.
+            */
+            {
+                if (suggestionRequest.CreditsDistribution != 0 && allPlayers.Count > 0)
+                {
+                    foreach (var role in Roles)
+                    {
+                        var rolePlayers = starters.Where(p => p.Role == role).ToList();
+                        if (rolePlayers.Count == 0)
+                            continue;
+
+                        var avgPerf = rolePlayers.Average(p => p.ExpectedPrice);
+                        startersSpreadCreditsScore += -0.005 * Math.Sqrt(
+                            rolePlayers.Sum(p => Math.Pow(p.ExpectedPrice - avgPerf, 2)) / rolePlayers.Count
+                        );
+                    }
+                }
+            }
+
+            //                       --- Goal Bonuses Per Role ---
             {
                 if (league.GoalBonusPerRole)
                     foreach (var role in Roles)
@@ -379,12 +405,12 @@ namespace Fantahelp.API.Services
                         }
                     }
             }
-            // --- Regularness ---
+            //                            --- Regularness ---
             {
                 if (starters.Count > 0)
                 {
                     var regularnessStarters = starters.Average(p => p.Regularness);
-                    regularnessStartersScore = regularnessStarters - 4;
+                    regularnessStartersScore = 5 * (regularnessStarters - 4);
                 }
 
                 if (subs.Count > 0)
@@ -393,7 +419,7 @@ namespace Fantahelp.API.Services
                     regularnessSubsScore = regularnessSubs - 3;
                 }
             }
-            // --- Team Bonuses ---
+            //                            --- Team Bonuses ---
             {
                 // MATES
                 var subsNames = new HashSet<string>(subs.Select(p => p.Name));
@@ -402,17 +428,17 @@ namespace Fantahelp.API.Services
                     : 0;
 
                 // SAME SQUAD PLAYERS
-                var nonGkPlayers = subs.Concat(starters).Where(p => p.Role != "P").ToList();
 
                 // More than 5 players of the same team
-                sameTeamScore = nonGkPlayers
+                sameTeamScore = allPlayers
+                    .Where(p => p.Role != "P")
                     .GroupBy(p => p.Squad)
                     .Sum(g => g.Count() >= 4 ? -1 * (g.Count() - 3) : 0);
 
                 // More than 2 players of the same team in the same Role
                 foreach (var role in Roles.Where(r => r != "P"))
                 {
-                    if (nonGkPlayers.Where(p => p.Role == role)
+                    if (allPlayers.Where(p => p.Role == role)
                         .GroupBy(p => p.Squad)
                         .Any(g => g.Count() >= 2))
                     {
@@ -421,18 +447,16 @@ namespace Fantahelp.API.Services
                 }
             }
             // Final Sum
-            strategyScore = 2*regularnessStartersScore + regularnessSubsScore
-                + mateScore + sameTeamScore + goalBonusPerRole;
-
-            if (starters.Concat(subs).Count() == 25)
-                Console.WriteLine($"regularnessStartersScore: {regularnessStartersScore}\nregularnessSubsScore: {regularnessSubsScore}\nmateScore: {mateScore}\nsameTeamScore: {sameTeamScore}\ngoalBonusPerRole: {goalBonusPerRole}");
+            strategyScore = regularnessStartersScore + regularnessSubsScore
+                + mateScore + sameTeamScore + goalBonusPerRole
+                + suggestionRequest.CreditsDistribution * startersSpreadCreditsScore;
 
             return strategyScore;
         }
 
-        private RoleValueTable PrecomputeRoleValues(List<Player> players, int slots, int maxBudget, LineUp lineUp, League league)
+        private RoleValueTable PrecomputeRoleValues(List<Player> players, int slots, int maxBudget, SuggestionRequest suggestionRequest, League league)
         {
-            RoleValueTable roleValueTable = new RoleValueTable {};
+            RoleValueTable roleValueTable = new() { };
 
             // DP table: [numPlayers][budget] = best selection
             for (int k = 1; k <= slots; k++)
@@ -461,7 +485,7 @@ namespace Fantahelp.API.Services
                             continue;
 
                         candidatePlayers.Add(player);
-                        var score = CalculateScore(candidatePlayers, lineUp, league);
+                        var score = CalculateScore(candidatePlayers, suggestionRequest, league);
 
                         var currentSelection = roleValueTable.GetPlayerSelection(k, b);
                         if (currentSelection == null || score.TotalScore > currentSelection.Score.TotalScore)
@@ -483,7 +507,7 @@ namespace Fantahelp.API.Services
             List<Player> currentPlayers,
             Dictionary<string, int> playersToBuy,
             int totalBudget,
-            LineUp lineUp,
+            SuggestionRequest suggestionRequest,
             League league)
         {
             FinalCombinationResult finalTable = new FinalCombinationResult {};
@@ -542,7 +566,7 @@ namespace Fantahelp.API.Services
                             .Select(id => playerLookup[id])
                             .ToList();
 
-                        Score newScore = CalculateScore(selectedPlayers, lineUp, league);
+                        Score newScore = CalculateScore(selectedPlayers, suggestionRequest, league);
                         Score lastScore = finalTable.GetPlayerSelection(t, newBudget)?.Score ?? new Score { TotalScore = double.MinValue };
 
                         if (newScore.TotalScore > lastScore.TotalScore)
