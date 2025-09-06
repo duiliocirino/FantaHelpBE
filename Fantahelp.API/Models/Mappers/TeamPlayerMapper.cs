@@ -4,6 +4,7 @@ public static class TeamPlayerMapper
     {
         return new TeamPlayerReadDto
         {
+            TeamId = teamPlayer.TeamId,
             PlayerId = teamPlayer.PlayerId,
             PlayerName = teamPlayer.Player.Name,
             AuctionPrice = teamPlayer.AuctionPrice
