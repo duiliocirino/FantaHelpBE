@@ -6,6 +6,10 @@
 # dotenv files
 .env
 
+# Local config overrides (keep secrets out of git)
+**/appsettings.Development.json
+**/appsettings.Production.json
+
 # User-specific files
 *.rsuser
 *.suo

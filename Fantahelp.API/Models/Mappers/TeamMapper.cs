@@ -7,6 +7,7 @@ public static class TeamMapper
             Id = team.Id,
             Name = team.Name,
             LeagueId = team.LeagueId,
+            OwnerId = team.OwnerId,
             RemainingBudget = team.RemainingBudget,
             Players = TeamPlayerMapper.ToReadDtos(team.Players)
         };

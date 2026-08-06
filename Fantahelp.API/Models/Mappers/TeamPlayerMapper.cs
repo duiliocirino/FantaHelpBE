@@ -7,6 +7,7 @@ public static class TeamPlayerMapper
             TeamId = teamPlayer.TeamId,
             PlayerId = teamPlayer.PlayerId,
             PlayerName = teamPlayer.Player.Name,
+            PlayerRole = teamPlayer.Player.Role,
             AuctionPrice = teamPlayer.AuctionPrice
         };
     }

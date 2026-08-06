@@ -7,6 +7,7 @@ public static class LeagueMapper
             Id = league.Id,
             Name = league.Name,
             InitialBudget = league.InitialBudget,
+            GoalBonusPerRole = league.GoalBonusPerRole,
             Teams = [.. league.Teams.Select(TeamMapper.ToReadDto)]
         };
     }
