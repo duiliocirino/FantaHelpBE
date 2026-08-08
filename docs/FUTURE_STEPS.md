@@ -6,9 +6,25 @@ Track of pending work, ordered by priority.
 
 ## High Priority
 
+### Import Pipeline Improvements
+
+**Context:** The CSV import (`POST /api/players/import`) currently drops or mis-handles several fields that the ML pipeline provides.
+
+**Issues:**
+
+| Field | Status | Detail |
+|---|---|---|
+| `Role_M` | **DONE** | Parsed from semicolon-separated CSV string to `List<string>`. Exposed in `PlayerReadDto`. |
+| `Age` | **DONE** | Added to `PlayerCreateDto`, mapped through to `Player` entity. Exposed in `PlayerReadDto`. |
+| `Mate` | Open | Stored as mate's **name** (string). Fragile: names are ambiguous ("Ederson D.s."), change over time. Consider storing as **player ID** (`MateId int?`) instead. |
+
+**Mate detail:** Currently stored as player name string. Open question: should BE resolve names to IDs post-import (two-pass), or should ML output mate's SkyBet ID directly?
+
+---
+
 ### AuctionedPlayer Scoring Logic (Non-blocking, Tracked)
 
-**Context:** The frontend sends `auctionedPlayer` (with `playerId` and `acquisitionPrice`) in the suggestion request to compute a "potential score" that includes this player. Currently the DTO field is deserialized correctly, but the `TeamSuggestionService` does not use it — the potential score returns the same value as the base score, making the convenience delta always zero.
+**Context:** The frontend sends `auctionedPlayer` (with `playerId` and `acquisitionPrice`) in the suggestion request to compute a "potential score" that includes this player. Currently the DTO field is deserialized correctly, but the `TeamSuggestionService` does not use it -- the potential score returns the same value as the base score, making the convenience delta always zero.
 
 **Files involved:**
 - `Fantahelp.API/Services/TeamSuggestionService.cs`
@@ -20,14 +36,6 @@ Track of pending work, ordered by priority.
 ---
 
 ## Medium Priority
-
-### Role_M Handling in PlayerService
-
-**File:** `Fantahelp.API/Services/PlayerService.cs:46`
-
-The `Role_M` field is currently stubbed as `new List<string> { p.Role }`. Needs proper handling once the data model supports multiple roles per player.
-
----
 
 ### Unit / Integration Tests
 
@@ -62,8 +70,8 @@ No auth is configured. Needed before exposing the API externally.
 
 | Date | Item | Status |
 |------|------|--------|
+| 2026-08-06 | Import pipeline improvements (Role_M, Age, Mate) | Open -- decisions needed |
 | 2026-08-06 | AuctionedPlayer scoring logic | Open |
-| 2026-08-06 | Role_M handling | Open |
 | 2026-08-06 | Tests | Open |
 | 2026-08-06 | Auth middleware | Open |
 | 2026-08-06 | Connection string via env vars | Open |

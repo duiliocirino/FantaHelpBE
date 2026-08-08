@@ -43,14 +43,19 @@ namespace Fantahelp.API.Services
                     Name = p.Name,
                     Squad = p.Squad,
                     Role = p.Role,
-                    Role_M = new List<string> { p.Role }, //TODO: handle correctly
+                    // ML outputs sub-positions as semicolon-separated string (e.g., "Dd;Ds;Dc").
+                    // Fallback to macro role if Role_M is absent or empty.
+                    Role_M = !string.IsNullOrWhiteSpace(p.Role_M)
+                        ? p.Role_M.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList()
+                        : new List<string> { p.Role },
                     Price = p.Price,
-                    Rating = p.MyRating,
+                    Age = (int)(p.Age ?? 0),
+                    Rating = p.MyRating ?? 0,
                     Mate = p.Mate,
-                    Regularness = p.Regularness,
+                    Regularness = p.Regularness ?? 0,
                     FVM = p.FVM,
                     ExpectedPrice = p.ExpPrice,
-                    ExpectedPerformance = p.ExpMf,
+                    ExpectedPerformance = p.ExpMf ?? 0,
                     ExpectedStd = p.ExpStd,
                 }).ToList();
                 // 3. REPLACE: Add the new list of players to the context.
