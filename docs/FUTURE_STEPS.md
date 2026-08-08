@@ -8,7 +8,7 @@ Track of pending work, ordered by priority.
 
 ### Import Pipeline Improvements
 
-**Context:** The CSV import (`POST /api/players/import`) currently drops or mis-handles several fields that the ML pipeline provides.
+**Context:** The CSV import (`POST /api/players/import`) now handles Age and Role_M correctly. Mate field still stores player names (string) rather than IDs.
 
 **Issues:**
 
@@ -70,7 +70,11 @@ No auth is configured. Needed before exposing the API externally.
 
 | Date | Item | Status |
 |------|------|--------|
-| 2026-08-06 | Import pipeline improvements (Role_M, Age, Mate) | Open -- decisions needed |
+| 2026-08-08 | Role_M import + ReadDto exposure | DONE (`faddf05`) |
+| 2026-08-08 | Age import + ReadDto exposure | DONE (`faddf05`) |
+| 2026-08-08 | Nullable CSV fields (Age, MyRating, Mate, Regularness, ExpMf) | DONE (`faddf05`) |
+| 2026-08-08 | ML-BE contract document | DONE (`0dcf540`) |
+| 2026-08-06 | Mate stored as name (consider MateId) | Open -- decision needed |
 | 2026-08-06 | AuctionedPlayer scoring logic | Open |
 | 2026-08-06 | Tests | Open |
 | 2026-08-06 | Auth middleware | Open |
