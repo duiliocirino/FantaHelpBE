@@ -78,6 +78,15 @@ Full contract: `docs/ml-be-contract.md`
 
 ---
 
+## FE-BE Coordination
+
+Frontend team tracks requested changes in:
+`/home/duilio999/StudioProjects/FantaHelpFE/docs/backend-changes-needed.md`
+
+Check this file before implementing new BE features to align with FE expectations.
+
+---
+
 ## Pending Items
 
 Track in `docs/FUTURE_STEPS.md`. Check before starting work to avoid duplicating effort.
