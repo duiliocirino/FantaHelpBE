@@ -38,7 +38,7 @@ All commands from repo root (`FantaHelpBE/`).
 - Start script: `./start_pod.sh` (reads `.env` for credentials)
 
 ### Start the API
-Set the connection string in `Fantahelp.API/appsettings.json` (see README for details), then:
+Set the connection string in `Fantahelp.API/appsettings.json` (see README for details). This file is in `.gitignore` — never commit it with real credentials. Then:
 ```bash
 dotnet tool restore
 dotnet tool run dotnet-ef database update --project Fantahelp.API
@@ -72,7 +72,7 @@ Full contract: `docs/ml-be-contract.md`
 - **DTOs over entities:** Controllers and services use DTOs. Never expose EF entities directly.
 - **Static mappers:** Mapping lives in `Models/Mappers/` (e.g., `PlayerMapper.ToReadDto()`).
 - **Service interface pattern:** Every service has an interface (`IPlayerService`) injected into controllers.
-- **ServiceResult wrapper:** Service methods return `ServiceResult<T>` with `Success`/`Data`/`Message`.
+- **ServiceResult wrapper:** Service methods return `ServiceResult<T>` with `Success`/`Data`/`Message`. Controllers unwrap `.Data` and return it directly (not wrapped in ServiceResult).
 - **Minimal diffs:** Change only what the task requires. Leave unrelated code alone.
 - **Read before edit:** Always read a file before modifying it in the same session.
 
@@ -84,10 +84,10 @@ Track in `docs/FUTURE_STEPS.md`. Check before starting work to avoid duplicating
 
 Key open items:
 - `Mate` stored as player name (string) — consider `MateId` (int?) instead
-- `AuctionedPlayer` scoring logic not wired in `TeamSuggestionService`
 - No unit/integration tests
 - No authentication middleware
 - Connection string should use env vars cleanly
+- Suggestion engine caching (tracked in FUTURE_STEPS.md)
 
 ---
 

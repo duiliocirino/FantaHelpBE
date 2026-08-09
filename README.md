@@ -288,6 +288,15 @@ The `TeamSuggestionService` implements a 3-stage dynamic programming algorithm:
 
 Player data includes ML-predicted fields: `ExpectedPerformance`, `ExpectedStd`, `ExpectedPrice`. An external ML pipeline generates the CSV that feeds this system.
 
+### AuctionedPlayer — Forced Inclusion
+
+When the frontend sends `auctionedPlayer: { playerId, acquisitionPrice }` in the suggestion request, the service forces that player into the roster at the given price and returns both scores in a single call:
+
+- `score` — base optimal (current roster only)
+- `potentialScore` — potential optimal (with auctioned player forced in). Nullable: `null` if player not found or acquisition price exceeds remaining budget.
+
+**How it works:** Stage 1 DP tables are computed once. For the potential path, only the affected role's table is recomputed (one fewer slot, reduced budget). The other three roles' tables are reused. Stage 2+3 (combination + backtrack) run twice — this is orders of magnitude cheaper than Stage 1.
+
 ## Current Limitations & Planned Work
 
 - **No authentication/authorization** -- the User model exists with a Password field, but no auth middleware is configured
