@@ -1,6 +1,3 @@
-using System.Linq;
-using System.Reflection.Emit;
-using System.Runtime.ConstrainedExecution;
 using Microsoft.EntityFrameworkCore;
 
 namespace Fantahelp.API.Services
@@ -53,14 +50,14 @@ namespace Fantahelp.API.Services
 
         public async Task<ServiceResult<List<SuggestionResult>>> GetOptimalTeamSuggestionAsync(SuggestionRequest suggestionRequest)
         {
-            // --- DATA PREPARATION ---
+            // --- DATA PREPARATION (shared) ---
             Dictionary<int, Player> playerLookup = _context.Players.ToDictionary(p => p.Id, p => p);
             Console.WriteLine($"PlayerLookup count: {playerLookup.Count}");
 
             Team? team = await _context.Teams
-                .Include(t => t.League)      // Loads the related League entity
-                .Include(t => t.Players)     // Loads the related Players collection
-                .ThenInclude(tp => tp.Player) // Loads the Player entity for each TeamPlayer
+                .Include(t => t.League)
+                .Include(t => t.Players)
+                .ThenInclude(tp => tp.Player)
                 .FirstOrDefaultAsync(t => t.Id == suggestionRequest.TeamId);
 
             if (team == null)
@@ -70,6 +67,252 @@ namespace Fantahelp.API.Services
             if (!availablePlayersResult.Success && availablePlayersResult.ErrorMessage != null)
                 return ServiceResult<List<SuggestionResult>>.FailureResult(availablePlayersResult.ErrorMessage);
 
+            var currentPlayers = BuildCurrentPlayers(team, suggestionRequest.FavoritePlayerIds, playerLookup);
+            Console.WriteLine($"CurrentPlayers count: {currentPlayers.Count}");
+            foreach (var p in currentPlayers)
+                Console.WriteLine($"CurrentPlayer: {p.Id}, {p.Name}, {p.Role}, AuctionPrice: {p.ExpectedPrice}");
+
+            var availablePlayers = (availablePlayersResult.Data ?? []).ToList();
+            var budgetSpentPerRole = ComputeBudgetSpentPerRole(team);
+            var playersToBuy = ComputePlayersToBuy(currentPlayers);
+
+            var availablePlayersByRole = BuildAvailableByRole(availablePlayers);
+
+            // --- STAGE 1: PRE-COMPUTATION PER ROLE (shared) ---
+            Console.WriteLine("Stage 1: Pre-computation per role started.");
+
+            var maxBudgetsPerRole = ComputeMaxBudgetsPerRole(team.League.InitialBudget, budgetSpentPerRole);
+
+            var stage1Tasks = new[]
+            {
+                Task.Run(() => PrecomputeRoleValues(
+                    players:    availablePlayersByRole["P"],
+                    slots:      playersToBuy["P"],
+                    maxBudget:  maxBudgetsPerRole["P"],
+                    suggestionRequest: suggestionRequest,
+                    league:     team.League)),
+                Task.Run(() => PrecomputeRoleValues(
+                    players:    availablePlayersByRole["D"],
+                    slots:      playersToBuy["D"],
+                    maxBudget:  maxBudgetsPerRole["D"],
+                    suggestionRequest: suggestionRequest,
+                    league:     team.League)),
+                Task.Run(() => PrecomputeRoleValues(
+                    players:    availablePlayersByRole["C"],
+                    slots:      playersToBuy["C"],
+                    maxBudget:  maxBudgetsPerRole["C"],
+                    suggestionRequest: suggestionRequest,
+                    league:     team.League)),
+                Task.Run(() => PrecomputeRoleValues(
+                    players:    availablePlayersByRole["A"],
+                    slots:      playersToBuy["A"],
+                    maxBudget:  maxBudgetsPerRole["A"],
+                    suggestionRequest: suggestionRequest,
+                    league:     team.League))
+            };
+
+            var results = await Task.WhenAll(stage1Tasks);
+            var roleValueTables = new[] { results[0], results[1], results[2], results[3] };
+
+            // --- STAGE 2+3: BASE (always) ---
+            Console.WriteLine("Stage 2+3: Base combination started.");
+            var baseResult = CombineAndBacktrack(
+                roleValueTables: roleValueTables,
+                currentPlayers: currentPlayers,
+                playersToBuy: playersToBuy,
+                totalBudget: team.RemainingBudget,
+                numTeams: suggestionRequest.NumTeams,
+                suggestionRequest: suggestionRequest,
+                playerLookup: playerLookup,
+                league: team.League
+            );
+
+            // --- STAGE 2+3: POTENTIAL (only when auctioned player is provided) ---
+            PotentialSuggestionResult? potentialResult = null;
+            if (suggestionRequest.AuctionedPlayer != null)
+            {
+                potentialResult = ComputePotentialScore(
+                    roleValueTables: roleValueTables,
+                    currentPlayers: currentPlayers,
+                    availablePlayers: availablePlayers,
+                    playersToBuy: playersToBuy,
+                    budgetSpentPerRole: budgetSpentPerRole,
+                    remainingBudget: team.RemainingBudget,
+                    auctionedPlayer: suggestionRequest.AuctionedPlayer,
+                    playerLookup: playerLookup,
+                    suggestionRequest: suggestionRequest,
+                    league: team.League,
+                    numTeams: suggestionRequest.NumTeams
+                );
+            }
+
+            baseResult.PotentialScore = potentialResult;
+            return ServiceResult<List<SuggestionResult>>.SuccessResult([baseResult]);
+        }
+
+        /// <summary>
+        /// Computes the potential score by forcing an auctioned player into the roster.
+        /// Reuses the same Stage 1 DP tables — only Stage 2+3 are re-run with adjusted inputs.
+        /// Returns null if the player is not found or the acquisition price exceeds budget.
+        /// </summary>
+        private PotentialSuggestionResult? ComputePotentialScore(
+            RoleValueTable[] roleValueTables,
+            List<Player> currentPlayers,
+            List<Player> availablePlayers,
+            Dictionary<string, int> playersToBuy,
+            Dictionary<string, int> budgetSpentPerRole,
+            int remainingBudget,
+            AuctionedPlayerInfo auctionedPlayer,
+            Dictionary<int, Player> playerLookup,
+            SuggestionRequest suggestionRequest,
+            League league,
+            int numTeams)
+        {
+            // Look up the player
+            if (!playerLookup.TryGetValue(auctionedPlayer.PlayerId, out var forcedPlayer))
+            {
+                Console.WriteLine($"[Potential] Player {auctionedPlayer.PlayerId} not found.");
+                return null;
+            }
+
+            // Check affordability
+            if (auctionedPlayer.AcquisitionPrice > remainingBudget)
+            {
+                Console.WriteLine($"[Potential] Acquisition price {auctionedPlayer.AcquisitionPrice} exceeds remaining budget {remainingBudget}.");
+                return null;
+            }
+
+            var forcedRole = forcedPlayer.Role;
+
+            // Clone the forced player with the acquisition price
+            var forcedPlayerClone = new Player
+            {
+                Id = forcedPlayer.Id,
+                Name = forcedPlayer.Name,
+                Squad = forcedPlayer.Squad,
+                Role = forcedPlayer.Role,
+                Role_M = forcedPlayer.Role_M,
+                Price = forcedPlayer.Price,
+                Age = forcedPlayer.Age,
+                Rating = forcedPlayer.Rating,
+                Mate = forcedPlayer.Mate,
+                Regularness = forcedPlayer.Regularness,
+                FVM = forcedPlayer.FVM,
+                ExpectedPerformance = forcedPlayer.ExpectedPerformance,
+                ExpectedStd = forcedPlayer.ExpectedStd,
+                ExpectedPrice = auctionedPlayer.AcquisitionPrice,
+                TeamPlayers = forcedPlayer.TeamPlayers
+            };
+
+            // Build modified inputs
+            var potentialCurrentPlayers = new List<Player>(currentPlayers) { forcedPlayerClone };
+
+            // Remove forced player from available pool (so DP won't pick him again)
+            var potentialAvailableByRole = BuildAvailableByRole(
+                availablePlayers.Where(p => p.Id != auctionedPlayer.PlayerId).ToList());
+
+            // Recompute Stage 1 for the forced role with one fewer slot
+            // (other roles' tables are reused unchanged)
+            var adjustedPlayersToBuy = playersToBuy.ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+            adjustedPlayersToBuy[forcedRole] = Math.Max(0, adjustedPlayersToBuy[forcedRole] - 1);
+
+            var adjustedBudgetSpent = budgetSpentPerRole.ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+            adjustedBudgetSpent[forcedRole] += auctionedPlayer.AcquisitionPrice;
+
+            var adjustedMaxBudgets = MaxPercInterval
+                .ToDictionary(kvp => kvp.Key, kvp => (int)(kvp.Value * league.InitialBudget - adjustedBudgetSpent[kvp.Key]));
+
+            // Recompute Stage 1 only for the affected role
+            Console.WriteLine($"[Potential] Recomputing Stage 1 for role {forcedRole} (slots {adjustedPlayersToBuy[forcedRole]}, budget {adjustedMaxBudgets[forcedRole]}).");
+            var roleIndex = Roles.IndexOf(forcedRole);
+            var potentialRoleTables = new RoleValueTable[4];
+            roleValueTables.CopyTo(potentialRoleTables, 0);
+
+            var recomputedTable = PrecomputeRoleValues(
+                players: potentialAvailableByRole[forcedRole],
+                slots: adjustedPlayersToBuy[forcedRole],
+                maxBudget: adjustedMaxBudgets[forcedRole],
+                suggestionRequest: suggestionRequest,
+                league: league);
+            potentialRoleTables[roleIndex] = recomputedTable;
+
+            var adjustedRemainingBudget = remainingBudget - auctionedPlayer.AcquisitionPrice;
+
+            Console.WriteLine("Stage 2+3: Potential combination started.");
+            var finalCombination = CombineRoleResults(
+                roleValueTables: potentialRoleTables,
+                currentPlayers: potentialCurrentPlayers,
+                playersToBuy: adjustedPlayersToBuy,
+                totalBudget: adjustedRemainingBudget,
+                suggestionRequest: suggestionRequest,
+                playerLookup: playerLookup,
+                league: league
+            );
+
+            var potentialResults = BacktrackToGetTeams(
+                finalCombination: finalCombination,
+                numTeams: numTeams,
+                playerLookup: playerLookup
+            );
+
+            if (potentialResults.Count == 0)
+                return null;
+
+            return new PotentialSuggestionResult
+            {
+                SuggestedPlayers = potentialResults[0].SuggestedPlayers,
+                TotalExpectedPrice = potentialResults[0].TotalExpectedPrice,
+                TotalExpectedPriceStd = potentialResults[0].TotalExpectedPriceStd,
+                Score = potentialResults[0].Score
+            };
+        }
+
+        /// <summary>
+        /// Runs Stage 2 (combine) + Stage 3 (backtrack) and returns a single SuggestionResult.
+        /// </summary>
+        private SuggestionResult CombineAndBacktrack(
+            RoleValueTable[] roleValueTables,
+            List<Player> currentPlayers,
+            Dictionary<string, int> playersToBuy,
+            int totalBudget,
+            int numTeams,
+            SuggestionRequest suggestionRequest,
+            Dictionary<int, Player> playerLookup,
+            League league)
+        {
+            var finalCombination = CombineRoleResults(
+                roleValueTables: roleValueTables,
+                currentPlayers: currentPlayers,
+                playersToBuy: playersToBuy,
+                totalBudget: totalBudget,
+                suggestionRequest: suggestionRequest,
+                playerLookup: playerLookup,
+                league: league
+            );
+
+            var results = BacktrackToGetTeams(
+                finalCombination: finalCombination,
+                numTeams: numTeams,
+                playerLookup: playerLookup
+            );
+
+            // Return the first (best) result; PotentialScore is attached by the caller
+            if (results.Count > 0)
+                return results[0];
+
+            // Fallback: empty result
+            return new SuggestionResult
+            {
+                SuggestedPlayers = [],
+                Score = new Score()
+            };
+        }
+
+        /// <summary>
+        /// Builds the list of current players from the team's roster plus favorites.
+        /// </summary>
+        private static List<Player> BuildCurrentPlayers(Team team, List<int> favoritePlayerIds, Dictionary<int, Player> playerLookup)
+        {
             var currentPlayers = team.Players
                 .Select(tp => new Player
                 {
@@ -86,152 +329,73 @@ namespace Fantahelp.API.Services
                     FVM = tp.Player.FVM,
                     ExpectedPerformance = tp.Player.ExpectedPerformance,
                     ExpectedStd = 0,
-                    ExpectedPrice = tp.AuctionPrice, // Set to AuctionPrice
+                    ExpectedPrice = tp.AuctionPrice,
                     TeamPlayers = tp.Player.TeamPlayers
                 })
                 .ToList();
 
-            foreach (var playerId in suggestionRequest.FavoritePlayerIds)
+            foreach (var playerId in favoritePlayerIds)
                 currentPlayers.Add(playerLookup[playerId]);
 
-            Console.WriteLine($"CurrentPlayers count: {currentPlayers.Count}");
-            foreach (var p in currentPlayers)
-                Console.WriteLine($"CurrentPlayer: {p.Id}, {p.Name}, {p.Role}, AuctionPrice: {p.ExpectedPrice}");
+            return currentPlayers;
+        }
 
-            var currentPlayersByRole = currentPlayers
+        /// <summary>
+        /// Groups available players by role, ensuring all roles are present.
+        /// </summary>
+        private static Dictionary<string, List<Player>> BuildAvailableByRole(List<Player> availablePlayers)
+        {
+            var result = availablePlayers
                 .GroupBy(p => p.Role)
-                .ToDictionary(
-                    g => g.Key,
-                    g => g.ToList()
-                );
-            // Ensure all roles are present, even if empty
+                .ToDictionary(g => g.Key, g => g.ToList());
             foreach (var role in Roles)
-            {
-                if (!currentPlayersByRole.ContainsKey(role))
-                    currentPlayersByRole[role] = [];
-                Console.WriteLine($"CurrentPlayersByRole[{role}]: {currentPlayersByRole[role].Count}");
-            }
+                if (!result.ContainsKey(role))
+                    result[role] = [];
+            return result;
+        }
 
-            var availablePlayers = availablePlayersResult.Data;
-            var availablePlayersByRole = (availablePlayers ?? [])
-                .GroupBy(p => p.Role)
-                .ToDictionary(
-                    g => g.Key,
-                    g => g.ToList()
-                );
-            // Ensure all roles are present, even if empty
-            foreach (var role in Roles)
-            {
-                if (!availablePlayersByRole.ContainsKey(role))
-                    availablePlayersByRole[role] = [];
-                Console.WriteLine($"AvailablePlayersByRole[{role}]: {availablePlayersByRole[role].Count}");
-            }
-
-            var bugdetSpentPerRole = team.Players
+        /// <summary>
+        /// Computes budget already spent per role from the team's roster.
+        /// </summary>
+        private static Dictionary<string, int> ComputeBudgetSpentPerRole(Team team)
+        {
+            var result = team.Players
                 .GroupBy(tp => tp.Player.Role)
-                .ToDictionary(
-                    g => g.Key,
-                    g => g.Sum(tp => tp.AuctionPrice)
-                );
-            // Ensure all roles are present, even if empty
+                .ToDictionary(g => g.Key, g => g.Sum(tp => tp.AuctionPrice));
             foreach (var role in Roles)
-            {
-                if (!bugdetSpentPerRole.ContainsKey(role))
-                    bugdetSpentPerRole[role] = 0;
-                Console.WriteLine($"BudgetSpentPerRole[{role}]: {bugdetSpentPerRole[role]}");
-            }
+                if (!result.ContainsKey(role))
+                    result[role] = 0;
+            return result;
+        }
 
-            var maxBudgetsPerRole = MaxPercInterval
-                .ToDictionary(
-                    kvp => kvp.Key,
-                    kvp => (int)(kvp.Value * team.League.InitialBudget - bugdetSpentPerRole[kvp.Key])
-                );
-            foreach (var role in Roles)
-                Console.WriteLine($"MaxBudgetPerRole[{role}]: {maxBudgetsPerRole[role]}");
-
-            var playersToBuy = PlayersPerRole
-                .ToDictionary(
-                    kvp => kvp.Key,
-                    kvp => kvp.Value
-                            - (currentPlayersByRole.TryGetValue(kvp.Key, out var list)
-                                ? list.Count
-                                : 0)
-                );
-            foreach (var role in Roles)
-                Console.WriteLine($"PlayersToBuy[{role}]: {playersToBuy[role]}");
-
-            // --- STAGE 1: PRE-COMPUTATION PER ROLE ---
-
-            Console.WriteLine("Stage 1: Pre-computation per role started.");
-
-            var stage1Tasks = new[]
-            {
-                Task.Run(() => PrecomputeRoleValues(
-                    players:    availablePlayersByRole["P"],
-                    slots:      playersToBuy["P"],
-                    maxBudget:  maxBudgetsPerRole["P"],
-                    suggestionRequest:  suggestionRequest,
-                    league:     team.League)),
-                Task.Run(() => PrecomputeRoleValues(
-                    players:    availablePlayersByRole["D"],
-                    slots:      playersToBuy["D"],
-                    maxBudget:  maxBudgetsPerRole["D"],
-                    suggestionRequest:  suggestionRequest,
-                    league:     team.League)),
-                Task.Run(() => PrecomputeRoleValues(
-                    players:    availablePlayersByRole["C"],
-                    slots:      playersToBuy["C"],
-                    maxBudget:  maxBudgetsPerRole["C"],
-                    suggestionRequest:  suggestionRequest,
-                    league:     team.League)),
-                Task.Run(() => PrecomputeRoleValues(
-                    players:    availablePlayersByRole["A"],
-                    slots:      playersToBuy["A"],
-                    maxBudget:  maxBudgetsPerRole["A"],
-                    suggestionRequest:  suggestionRequest,
-                    league:     team.League))
-            };
-
-            var results = await Task.WhenAll(stage1Tasks);
-
-            var goalkeeperValues = results[0];
-            //Console.WriteLine("Goalkeeper values precomputed.");
-            //PrintTopExamples(goalkeeperValues, "Goalkeeper", playersToBuy["P"], playerLookup);
-
-            var defenderValues = results[1];
-            //Console.WriteLine("Defender values precomputed.");
-            //PrintTopExamples(defenderValues, "Defender", playersToBuy["D"], playerLookup);
-
-            var midfielderValues = results[2];
-            //Console.WriteLine("Midfielder values precomputed.");
-            //PrintTopExamples(midfielderValues, "Midfielder", playersToBuy["C"], playerLookup);
-
-            var attackerValues = results[3];
-            //Console.WriteLine("Attacker values precomputed.");
-            //PrintTopExamples(attackerValues, "Attacker", playersToBuy["A"], playerLookup);
-
-            // --- STAGE 2: FINAL COMBINATION ---
-            Console.WriteLine("Stage 2: Final combination started.");
-            var finalCombination = CombineRoleResults(
-                roleValueTables:    [goalkeeperValues, defenderValues, midfielderValues, attackerValues],
-                currentPlayers:     currentPlayers,
-                playersToBuy:       playersToBuy,
-                totalBudget:        team.RemainingBudget,
-                suggestionRequest:  suggestionRequest,
-                playerLookup:       playerLookup,
-                league:             team.League
+        /// <summary>
+        /// Computes how many players still need to be bought per role.
+        /// </summary>
+        private static Dictionary<string, int> ComputePlayersToBuy(List<Player> currentPlayers)
+        {
+            var currentByRole = currentPlayers.GroupBy(p => p.Role)
+                .ToDictionary(g => g.Key, g => g.Count());
+            var result = PlayersPerRole.ToDictionary(
+                kvp => kvp.Key,
+                kvp => kvp.Value - (currentByRole.TryGetValue(kvp.Key, out var count) ? count : 0)
             );
-            Console.WriteLine("Final combination completed.");
+            foreach (var role in Roles)
+                Console.WriteLine($"PlayersToBuy[{role}]: {result[role]}");
+            return result;
+        }
 
-            // --- STAGE 3: BACKTRACK AND RETURN ---
-            Console.WriteLine("Stage 3: Backtrack and return started.");
-            var suggestedResults = BacktrackToGetTeams(
-                finalCombination: finalCombination,
-                numTeams: suggestionRequest.NumTeams,
-                playerLookup: playerLookup);
-            Console.WriteLine("Backtrack and return completed.");
-
-            return ServiceResult<List<SuggestionResult>>.SuccessResult(suggestedResults);
+        /// <summary>
+        /// Computes max budget per role based on league rules and already-spent amounts.
+        /// </summary>
+        private static Dictionary<string, int> ComputeMaxBudgetsPerRole(int initialBudget, Dictionary<string, int> budgetSpentPerRole)
+        {
+            var result = MaxPercInterval.ToDictionary(
+                kvp => kvp.Key,
+                kvp => (int)(kvp.Value * initialBudget - budgetSpentPerRole[kvp.Key])
+            );
+            foreach (var role in Roles)
+                Console.WriteLine($"MaxBudgetPerRole[{role}]: {result[role]}");
+            return result;
         }
 
         // --- PRIVATE METHODS ---

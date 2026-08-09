@@ -22,16 +22,25 @@ Track of pending work, ordered by priority.
 
 ---
 
-### AuctionedPlayer Scoring Logic (Non-blocking, Tracked)
+### AuctionedPlayer Scoring Logic ✅ DONE
 
-**Context:** The frontend sends `auctionedPlayer` (with `playerId` and `acquisitionPrice`) in the suggestion request to compute a "potential score" that includes this player. Currently the DTO field is deserialized correctly, but the `TeamSuggestionService` does not use it -- the potential score returns the same value as the base score, making the convenience delta always zero.
+**Context:** The frontend sends `auctionedPlayer` (with `playerId` and `acquisitionPrice`) in the suggestion request to compute a "potential score" that includes this player.
 
-**Files involved:**
-- `Fantahelp.API/Services/TeamSuggestionService.cs`
-- `Fantahelp.API/Models/Dtos/SuggestionRequest.cs`
-- `Fantahelp.API/Models/Dtos/AuctionedPlayerInfo.cs`
+**Implementation:** When `AuctionedPlayer` is set, the service forces the player into the roster at the given acquisition price, deducts from budget and slots for that role, recomputes Stage 1 only for the affected role, and reuses cached tables for the other three roles. Both base and potential scores are returned in a single call via `SuggestionResult.PotentialScore`.
 
-**What to do:** When `suggestionRequest.AuctionedPlayer` is not null, look up the player by ID, set its `ExpectedPrice` to `acquisitionPrice`, and inject it into the scoring calculation alongside the current roster so the potential score reflects the added player.
+**Optimization:** Stage 1 DP tables (the expensive part) run once. Only the affected role's table is recomputed for the potential path. Stage 2+3 (cheap combination + backtrack) run twice.
+
+**Edge cases handled:** Player not found → `PotentialScore` is null. Acquisition price exceeds budget → `PotentialScore` is null.
+
+---
+
+### Suggestion Engine Caching
+
+**Context:** The suggestion engine recomputes Stage 1 DP tables on every request (~1 MB, tens of ms). During live auctions, the frontend may fire rapid repeated calls with the same team state.
+
+**What to do:** Add an in-process LRU cache keyed by a hash of `(teamId, availablePlayerIds, teamComposition)`. Cache the Stage 1 `RoleValueTable` results per role. Invalidate when the team changes (player added/removed). Small capacity (5 entries, ~5 MB max) is sufficient — the within-request optimization already avoids redundant DP work for the auctioned player path.
+
+**Options:** `Microsoft.Extensions.Caching.Memory.MemoryCache` with size-based eviction, or a simple `ConcurrentDictionary` with manual LRU logic.
 
 ---
 
@@ -70,12 +79,13 @@ No auth is configured. Needed before exposing the API externally.
 
 | Date | Item | Status |
 |------|------|--------|
+| 2026-08-09 | AuctionedPlayer forced inclusion + single-call dual score | In progress |
+| 2026-08-09 | Suggestion engine caching (tracked) | Planned |
 | 2026-08-08 | Role_M import + ReadDto exposure | DONE (`faddf05`) |
 | 2026-08-08 | Age import + ReadDto exposure | DONE (`faddf05`) |
 | 2026-08-08 | Nullable CSV fields (Age, MyRating, Mate, Regularness, ExpMf) | DONE (`faddf05`) |
 | 2026-08-08 | ML-BE contract document | DONE (`0dcf540`) |
 | 2026-08-06 | Mate stored as name (consider MateId) | Open -- decision needed |
-| 2026-08-06 | AuctionedPlayer scoring logic | Open |
 | 2026-08-06 | Tests | Open |
 | 2026-08-06 | Auth middleware | Open |
 | 2026-08-06 | Connection string via env vars | Open |
