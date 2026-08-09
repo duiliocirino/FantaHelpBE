@@ -39,13 +39,21 @@ namespace Fantahelp.API.Services
 
         public async Task<ServiceResult<IEnumerable<League>>> GetAllLeaguesAsync()
         {
-            var leagues = await _context.Leagues.ToListAsync();
+            var leagues = await _context.Leagues
+                .Include(l => l.Teams)
+                    .ThenInclude(t => t.Players)
+                        .ThenInclude(tp => tp.Player)
+                .ToListAsync();
             return ServiceResult<IEnumerable<League>>.SuccessResult(leagues);
         }
 
         public async Task<ServiceResult<League>> GetLeagueByIdAsync(int id)
         {
-            var league = await _context.Leagues.FindAsync(id);
+            var league = await _context.Leagues
+                .Include(l => l.Teams)
+                    .ThenInclude(t => t.Players)
+                        .ThenInclude(tp => tp.Player)
+                .FirstOrDefaultAsync(l => l.Id == id);
             if (league == null)
                 return ServiceResult<League>.FailureResult("The given id returned 0 results.");
             return ServiceResult<League>.SuccessResult(league);
@@ -65,7 +73,12 @@ namespace Fantahelp.API.Services
             league.Teams.Add(team);
             await _context.SaveChangesAsync();
 
-            return ServiceResult<League>.SuccessResult(league);
+            var updatedLeague = await _context.Leagues
+                .Include(l => l.Teams)
+                    .ThenInclude(t => t.Players)
+                        .ThenInclude(tp => tp.Player)
+                .FirstOrDefaultAsync(l => l.Id == leagueId);
+            return ServiceResult<League>.SuccessResult(updatedLeague!);
         }
 
         public async Task<ServiceResult<League>> RemoveTeamFromLeagueAsync(int leagueId, int teamId)
@@ -81,13 +94,20 @@ namespace Fantahelp.API.Services
             league.Teams.Remove(team);
             await _context.SaveChangesAsync();
 
-            return ServiceResult<League>.SuccessResult(league);
+            var updatedLeague = await _context.Leagues
+                .Include(l => l.Teams)
+                    .ThenInclude(t => t.Players)
+                        .ThenInclude(tp => tp.Player)
+                .FirstOrDefaultAsync(l => l.Id == leagueId);
+            return ServiceResult<League>.SuccessResult(updatedLeague!);
         }
 
         public async Task<ServiceResult<IEnumerable<Team>>> GetAllTeamsFromLeagueAsync(int leagueId)
         {
             var teams = await _context.Teams
                 .Where(t => t.LeagueId == leagueId)
+                .Include(t => t.Players)
+                .ThenInclude(tp => tp.Player)
                 .ToListAsync();
             return ServiceResult<IEnumerable<Team>>.SuccessResult(teams);
         }

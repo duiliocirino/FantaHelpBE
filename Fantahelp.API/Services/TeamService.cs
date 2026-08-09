@@ -15,13 +15,19 @@ namespace Fantahelp.API.Services
 
         public async Task<ServiceResult<IEnumerable<Team>>> GetAllTeamsAsync()
         {
-            var teams = await _context.Teams.ToListAsync();
+            var teams = await _context.Teams
+                .Include(t => t.Players)
+                .ThenInclude(tp => tp.Player)
+                .ToListAsync();
             return ServiceResult<IEnumerable<Team>>.SuccessResult(teams);
         }
 
         public async Task<ServiceResult<Team>> GetTeamByIdAsync(int id)
         {
-            Team? team = await _context.Teams.FindAsync(id);
+            Team? team = await _context.Teams
+                .Include(t => t.Players)
+                .ThenInclude(tp => tp.Player)
+                .FirstOrDefaultAsync(t => t.Id == id);
             if (team == null)
                 return ServiceResult<Team>.FailureResult("The given id returned 0 results.");
             return ServiceResult<Team>.SuccessResult(team);
