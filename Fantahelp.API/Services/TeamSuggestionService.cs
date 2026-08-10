@@ -58,13 +58,18 @@ namespace Fantahelp.API.Services
             _logger.LogInformation("Starting base team suggestion.");
             var baseTask = ComputeSingleSuggestionAsync(currentPlayers, availablePlayers, team, playerLookup, suggestionRequest);
 
-            // --- 2. POTENTIAL SUGGESTION TASK (if auctioned player is provided) ---
+            // --- 2. POTENTIAL & WITHOUT PLAYER SUGGESTION TASKS (if auctioned player is provided) ---
             Task<SuggestionResult?> potentialTask = Task.FromResult<SuggestionResult?>(null);
+            Task<SuggestionResult?> withoutTask = Task.FromResult<SuggestionResult?>(null);
 
             if (suggestionRequest.AuctionedPlayer != null)
             {
                 if (playerLookup.TryGetValue(suggestionRequest.AuctionedPlayer.PlayerId, out var forcedPlayer))
                 {
+                    // Pool with auctioned player excluded (shared by both potential and without paths)
+                    var excludedAvailablePlayers = availablePlayers.Where(p => p.Id != forcedPlayer.Id).ToList();
+
+                    // --- POTENTIAL PATH: forced player at acquisition price ---
                     if (suggestionRequest.AuctionedPlayer.AcquisitionPrice <= team.League.InitialBudget)
                     {
                         _logger.LogInformation("Starting potential team suggestion for forced player {Name} (Id={Id}) at price {Price}.",
@@ -79,10 +84,9 @@ namespace Fantahelp.API.Services
                         );
 
                         var potentialCurrentPlayers = new List<ScoringPlayer>(currentPlayers) { forcedScoringPlayer };
-                        var potentialAvailablePlayers = availablePlayers.Where(p => p.Id != forcedPlayer.Id).ToList();
 
                         potentialTask = ComputeSingleSuggestionAsync(
-                            potentialCurrentPlayers, potentialAvailablePlayers, team, playerLookup, suggestionRequest, forcedScoringPlayer)
+                            potentialCurrentPlayers, excludedAvailablePlayers, team, playerLookup, suggestionRequest, forcedScoringPlayer)
                             .ContinueWith(t => (SuggestionResult?)t.Result);
                     }
                     else
@@ -90,18 +94,27 @@ namespace Fantahelp.API.Services
                         _logger.LogWarning("[Potential] Acquisition price {Price} exceeds initial budget {Budget}.",
                             suggestionRequest.AuctionedPlayer.AcquisitionPrice, team.League.InitialBudget);
                     }
+
+                    // --- WITHOUT PLAYER PATH: player excluded from market entirely (Plan B) ---
+                    _logger.LogInformation("Starting without-player team suggestion (excluding {Name} from market).",
+                        forcedPlayer.Name);
+
+                    withoutTask = ComputeSingleSuggestionAsync(
+                        currentPlayers, excludedAvailablePlayers, team, playerLookup, suggestionRequest, forcedPlayer: null)
+                        .ContinueWith(t => (SuggestionResult?)t.Result);
                 }
                 else
                 {
-                    _logger.LogWarning("[Potential] Player {PlayerId} not found.", suggestionRequest.AuctionedPlayer.PlayerId);
+                    _logger.LogWarning("[Auctioned] Player {PlayerId} not found.", suggestionRequest.AuctionedPlayer.PlayerId);
                 }
             }
 
-            // Execute base and potential computations concurrently
-            await Task.WhenAll((Task)baseTask, (Task)potentialTask);
+            // Execute all computations concurrently
+            await Task.WhenAll((Task)baseTask, (Task)potentialTask, (Task)withoutTask);
 
             var baseResult = await baseTask;
             var potentialResult = await potentialTask;
+            var withoutResult = await withoutTask;
 
             if (potentialResult != null)
             {
@@ -111,6 +124,17 @@ namespace Fantahelp.API.Services
                     TotalExpectedPrice = potentialResult.TotalExpectedPrice,
                     TotalExpectedPriceStd = potentialResult.TotalExpectedPriceStd,
                     Score = potentialResult.Score
+                };
+            }
+
+            if (withoutResult != null)
+            {
+                baseResult.WithoutPlayerScore = new WithoutPlayerSuggestionResult
+                {
+                    SuggestedPlayers = withoutResult.SuggestedPlayers,
+                    TotalExpectedPrice = withoutResult.TotalExpectedPrice,
+                    TotalExpectedPriceStd = withoutResult.TotalExpectedPriceStd,
+                    Score = withoutResult.Score
                 };
             }
 
@@ -133,7 +157,7 @@ namespace Fantahelp.API.Services
             var playersToBuy = ComputePlayersToBuy(currentPlayers);
             var availablePlayersByRole = BuildAvailableByRole(availablePlayers);
 
-            var baseCapsPerRole = ComputeMaxBudgetsPerRole(team.League.InitialBudget, budgetSpentPerRole);
+            var baseCapsPerRole = ComputeMaxBudgetsPerRole(team.League.InitialBudget, budgetSpentPerRole, suggestionRequest);
 
             // Saved credits from already-purchased team players and forced player discounts
             int savedFromCurrent = 0;
@@ -321,9 +345,20 @@ namespace Fantahelp.API.Services
             return result;
         }
 
-        private static Dictionary<string, int> ComputeMaxBudgetsPerRole(int initialBudget, Dictionary<string, int> budgetSpentPerRole)
+        private static Dictionary<string, int> ComputeMaxBudgetsPerRole(int initialBudget, Dictionary<string, int> budgetSpentPerRole, SuggestionRequest suggestionRequest)
         {
-            var result = MaxPercInterval.ToDictionary(
+            var allocation = suggestionRequest.BudgetAllocation;
+            var perc = allocation != null
+                ? new Dictionary<string, double>
+                {
+                    { "P", allocation.Goalkeepers },
+                    { "D", allocation.Defenders },
+                    { "C", allocation.Midfielders },
+                    { "A", allocation.Attackers }
+                }
+                : MaxPercInterval;
+
+            var result = perc.ToDictionary(
                 kvp => kvp.Key,
                 kvp => (int)(kvp.Value * initialBudget - budgetSpentPerRole[kvp.Key])
             );
