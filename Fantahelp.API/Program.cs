@@ -24,6 +24,11 @@ builder.Services.AddScoped<ILeagueService, LeagueService>();
 builder.Services.AddScoped<IUserService, UserService>();
 builder.Services.AddScoped<ITeamSuggestionService, TeamSuggestionService>();
 
+builder.Services.AddMemoryCache(options =>
+{
+    options.SizeLimit = 25; // Max 25 DP table entries (~5 MB)
+});
+
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();

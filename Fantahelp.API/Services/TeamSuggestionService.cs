@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 
 namespace Fantahelp.API.Services
@@ -8,12 +9,16 @@ namespace Fantahelp.API.Services
         private readonly FantahelpContext _context;
         private readonly ILeagueService _leagueService;
         private readonly ILogger<TeamSuggestionService> _logger;
+        private readonly IMemoryCache _cache;
 
-        public TeamSuggestionService(FantahelpContext context, ILeagueService leagueService, ILogger<TeamSuggestionService> logger)
+        private const int CacheCapacity = 25;
+
+        public TeamSuggestionService(FantahelpContext context, ILeagueService leagueService, ILogger<TeamSuggestionService> logger, IMemoryCache cache)
         {
             _context = context;
             _leagueService = leagueService;
             _logger = logger;
+            _cache = cache;
         }
 
         private static readonly List<string> Roles = ["P", "D", "C", "A"];
@@ -178,6 +183,7 @@ namespace Fantahelp.API.Services
                     maxBudget:  dpMaxPerRole["P"],
                     suggestionRequest: suggestionRequest,
                     league:     team.League,
+                    currentPlayers: currentPlayers,
                     forcedPlayer: forcedPlayer)),
                 Task.Run(() => PrecomputeRoleValues(
                     players:    availablePlayersByRole["D"],
@@ -185,6 +191,7 @@ namespace Fantahelp.API.Services
                     maxBudget:  dpMaxPerRole["D"],
                     suggestionRequest: suggestionRequest,
                     league:     team.League,
+                    currentPlayers: currentPlayers,
                     forcedPlayer: forcedPlayer)),
                 Task.Run(() => PrecomputeRoleValues(
                     players:    availablePlayersByRole["C"],
@@ -192,6 +199,7 @@ namespace Fantahelp.API.Services
                     maxBudget:  dpMaxPerRole["C"],
                     suggestionRequest: suggestionRequest,
                     league:     team.League,
+                    currentPlayers: currentPlayers,
                     forcedPlayer: forcedPlayer)),
                 Task.Run(() => PrecomputeRoleValues(
                     players:    availablePlayersByRole["A"],
@@ -199,6 +207,7 @@ namespace Fantahelp.API.Services
                     maxBudget:  dpMaxPerRole["A"],
                     suggestionRequest: suggestionRequest,
                     league:     team.League,
+                    currentPlayers: currentPlayers,
                     forcedPlayer: forcedPlayer))
             };
 
@@ -371,12 +380,39 @@ namespace Fantahelp.API.Services
             int maxBudget,
             SuggestionRequest suggestionRequest,
             League league,
+            List<ScoringPlayer> currentPlayers,
             ScoringPlayer? forcedPlayer = null)
         {
+            string role = players.Count > 0 ? players[0].Role : string.Empty;
+            var currentRoleMates = currentPlayers.Where(p => p.Role == role).ToList();
+
+            // --- CACHE LOOKUP ---
+            var cacheKey = BuildDpCacheKey(
+                role: role,
+                rolePlayerIds: players.Select(p => p.Id).ToList(),
+                slots: slots,
+                maxBudget: maxBudget,
+                forcedPlayerId: forcedPlayer?.Id,
+                currentRoleMateIds: currentRoleMates.Select(p => p.Id).ToList(),
+                lineup: suggestionRequest.LineUp,
+                creditsDistribution: suggestionRequest.CreditsDistribution,
+                budgetAllocation: suggestionRequest.BudgetAllocation
+            );
+
+            if (_cache.TryGetValue(cacheKey, out RoleValueTable? cached))
+            {
+                _logger.LogDebug("[Cache hit] Role={Role} Slots={Slots} Budget={Budget}",
+                    cacheKey.Split(':')[1], slots, maxBudget);
+                return cached!;
+            }
+
+            _logger.LogDebug("[Cache miss] Role={Role} Slots={Slots} Budget={Budget}",
+                cacheKey.Split(':')[1], slots, maxBudget);
+
+            // --- DP COMPUTATION ---
             RoleValueTable roleValueTable = new() { };
             var playerById = players.ToDictionary(p => p.Id);
 
-            string role = players.Count > 0 ? players[0].Role : string.Empty;
             bool applyForcedPlayer = forcedPlayer != null && role == forcedPlayer.Role;
 
             for (int k = 1; k <= slots; k++)
@@ -404,9 +440,11 @@ namespace Fantahelp.API.Services
 
                         candidatePlayers.Add(player);
 
-                        var evalPlayers = applyForcedPlayer
-                            ? new List<ScoringPlayer>(candidatePlayers) { forcedPlayer! }
-                            : candidatePlayers;
+                        // Score against the full role unit: candidates + current mates + forced player
+                        var evalPlayers = new List<ScoringPlayer>(candidatePlayers);
+                        evalPlayers.AddRange(currentRoleMates);
+                        if (applyForcedPlayer)
+                            evalPlayers.Add(forcedPlayer!);
 
                         var score = ScoringEngine.CalculateScore(evalPlayers, suggestionRequest, league);
 
@@ -434,6 +472,13 @@ namespace Fantahelp.API.Services
                         roleValueTable.SetPlayerSelection(k, b, best.Score, best.PlayerIds);
                 }
             }
+
+            // --- CACHE INSERT ---
+            _cache.Set(cacheKey, roleValueTable, new MemoryCacheEntryOptions
+            {
+                AbsoluteExpiration = DateTimeOffset.UtcNow.AddMinutes(10),
+                Size = 1,
+            });
 
             return roleValueTable;
         }
@@ -553,6 +598,33 @@ namespace Fantahelp.API.Services
             }
 
             return suggestionResults;
+        }
+
+        /// <summary>
+        /// Builds a deterministic cache key for a DP table entry.
+        /// Includes all factors that affect DP scoring: role, player pool, slots, budget,
+        /// forced player context, current role-mates, lineup configuration, credits distribution and budget allocation.
+        /// </summary>
+        private static string BuildDpCacheKey(
+            string role,
+            IReadOnlyList<int> rolePlayerIds,
+            int slots,
+            int maxBudget,
+            int? forcedPlayerId,
+            IReadOnlyList<int> currentRoleMateIds,
+            LineUp lineup,
+            int creditsDistribution,
+            BudgetAllocation? budgetAllocation)
+        {
+            // Deterministic hash from sorted player IDs
+            var hash = rolePlayerIds.OrderBy(id => id).Aggregate(0L, (h, id) => h ^ (id.GetHashCode() * 31L));
+            var matesHash = currentRoleMateIds.OrderBy(id => id).Aggregate(0L, (h, id) => h ^ (id.GetHashCode() * 31L));
+            var lineupKey = $"{lineup.Defenders}-{lineup.Midfielders}-{lineup.Attackers}";
+            var forcedKey = forcedPlayerId ?? -1;
+            var allocKey = budgetAllocation != null
+                ? $"{budgetAllocation.Goalkeepers:F2}-{budgetAllocation.Defenders:F2}-{budgetAllocation.Midfielders:F2}-{budgetAllocation.Attackers:F2}"
+                : "default";
+            return $"dp:{role}:{hash}:{slots}:{maxBudget}:{forcedKey}:{matesHash}:{lineupKey}:{creditsDistribution}:{allocKey}";
         }
     }
 }
