@@ -32,8 +32,8 @@ dotnet tool run dotnet-ef database update --project Fantahelp.API
 # 7. Run the API
 dotnet run --project Fantahelp.API
 
-# The API is available at https://localhost:7202 (HTTPS) or http://localhost:5102 (HTTP)
-# Swagger UI: https://localhost:7202/swagger
+# The API is available at https://localhost:60000 (HTTPS) or http://localhost:60001 (HTTP)
+# Swagger UI: https://localhost:60000/swagger
 ```
 
 ## What This Is
@@ -188,8 +188,8 @@ dotnet run --project Fantahelp.API
 ```
 
 The API starts on two ports by default:
-- **HTTP:** `http://localhost:5102`
-- **HTTPS:** `https://localhost:7202`
+- **HTTP:** `http://localhost:60001`
+- **HTTPS:** `https://localhost:60000`
 
 Swagger UI is available at the HTTPS URL + `/swagger`.
 
@@ -275,7 +275,8 @@ The `TeamSuggestionService` implements a 3-stage dynamic programming algorithm:
 ### Constraints
 
 - **Role requirements:** GK=3, DEF=8, MID=8, FWD=6 players per team
-- **Budget caps per role:** GK=10%, DEF=30%, MID=60%, FWD=60% of initial budget
+- **Budget caps per role:** Defaults GK=10%, DEF=30%, MID=60%, FWD=60% of initial budget. Customizable via `BudgetAllocation` DTO in the suggestion request.
+- **Credits distribution:** Configurable spread parameter (0-5) controlling how evenly budget is distributed across picks
 - **One player per team per league** enforced at the `TeamPlayer` level
 
 ### Scoring
@@ -290,19 +291,20 @@ Player data includes ML-predicted fields: `ExpectedPerformance`, `ExpectedStd`, 
 
 ### AuctionedPlayer — Forced Inclusion
 
-When the frontend sends `auctionedPlayer: { playerId, acquisitionPrice }` in the suggestion request, the service forces that player into the roster at the given price and returns both scores in a single call:
+When the frontend sends `auctionedPlayer: { playerId, acquisitionPrice }` in the suggestion request, the service computes three paths concurrently and returns all scores in a single call:
 
 - `score` — base optimal (current roster only)
-- `potentialScore` — potential optimal (with auctioned player forced in). Nullable: `null` if player not found or acquisition price exceeds remaining budget.
+- `potentialScore` — optimal with auctioned player forced in at `acquisitionPrice`. Nullable: `null` if player not found or acquisition price exceeds initial budget.
+- `withoutPlayerScore` — Plan B: optimal team excluding the auctioned player from the market pool entirely. Useful for comparing "buy now" vs "let someone else buy".
 
-**How it works:** Stage 1 DP tables are computed once. For the potential path, only the affected role's table is recomputed (one fewer slot, reduced budget). The other three roles' tables are reused. Stage 2+3 (combination + backtrack) run twice — this is orders of magnitude cheaper than Stage 1.
+**How it works:** Three paths run concurrently via `Task.WhenAll`. Stage 1 DP tables are cached in-process (`IMemoryCache`, 25 entries, per-role granularity). When a defender is auctioned, P/C/A tables are shared across all three paths via cache hits. Within a single request: ~50% DP table reduction. Across requests (after purchasing): ~75% reduction since P/C/A entries survive.
 
 ## Current Limitations & Planned Work
 
 - **No authentication/authorization** -- the User model exists with a Password field, but no auth middleware is configured
 - **No tests** -- no unit or integration test project exists
 - **CSV import is destructive** -- `POST /api/players/import` wipes all existing players before importing
-- **No caching** -- the suggestion engine runs on every request; a hybrid caching approach (state-key based) is planned
+- **Caching Phase 2** -- DP table cache is implemented (Phase 1). Phase 2: invalidate cache on player re-import via a version token service
 - **No background jobs** -- heavy computations block the request thread
 - **Frontend is separate** -- this repo is backend-only
 

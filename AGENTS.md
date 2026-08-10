@@ -22,6 +22,7 @@ Fantahelp.API/
 │   ├── Mappers/          # Static mapping classes (PlayerMapper, TeamMapper, etc.)
 │   └── Player.cs, Team.cs, etc.   # EF entities
 ├── Services/             # Business logic (IPlayerService, ITeamService, etc.)
+│   └── Helpers/          # ScoringEngine, ScoringPlayer record
 ├── Utils/                # Helpers (CsvParser, etc.)
 └── Properties/launchSettings.json  # Dev profiles (HTTP port 60001)
 ```
@@ -44,7 +45,7 @@ dotnet tool restore
 dotnet tool run dotnet-ef database update --project Fantahelp.API
 dotnet run --project Fantahelp.API
 ```
-Default ports: HTTP `http://localhost:5102`, HTTPS `https://localhost:7202`. Swagger at HTTPS + `/swagger`.
+Default ports: HTTP `http://localhost:60001`, HTTPS `https://localhost:60000`. Swagger at HTTPS + `/swagger`.
 
 See README.md for the full Quick Start and Full Setup guides.
 
@@ -73,6 +74,7 @@ Full contract: `docs/ml-be-contract.md`
 - **Static mappers:** Mapping lives in `Models/Mappers/` (e.g., `PlayerMapper.ToReadDto()`).
 - **Service interface pattern:** Every service has an interface (`IPlayerService`) injected into controllers.
 - **ServiceResult wrapper:** Service methods return `ServiceResult<T>` with `Success`/`Data`/`Message`. Controllers unwrap `.Data` and return it directly (not wrapped in ServiceResult).
+- **ScoringPlayer record:** The suggestion engine uses `ScoringPlayer` (not `Player` entity) to separate `MarketValue` from `AcquisitionCost`. Never mutate EF entities in-flight.
 - **Minimal diffs:** Change only what the task requires. Leave unrelated code alone.
 - **Read before edit:** Always read a file before modifying it in the same session.
 
@@ -96,7 +98,7 @@ Key open items:
 - No unit/integration tests
 - No authentication middleware
 - Connection string should use env vars cleanly
-- Suggestion engine caching (tracked in FUTURE_STEPS.md)
+- Suggestion engine caching Phase 2: invalidation on player import (tracked in FUTURE_STEPS.md)
 
 ---
 

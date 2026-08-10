@@ -49,11 +49,26 @@ Track of pending work, ordered by priority.
 
 ### Suggestion Engine Caching
 
-**Context:** The suggestion engine recomputes Stage 1 DP tables on every request (~1 MB, tens of ms). During live auctions, the frontend may fire rapid repeated calls with the same team state.
+**Context:** The suggestion engine recomputes Stage 1 DP tables on every request. During live auctions, the frontend fires rapid repeated calls with overlapping team states.
 
-**What to do:** Add an in-process LRU cache keyed by a hash of `(teamId, availablePlayerIds, teamComposition)`. Cache the Stage 1 `RoleValueTable` results per role. Invalidate when the team changes (player added/removed). Small capacity (5 entries, ~5 MB max) is sufficient.
+**Phase 1 — Core cache: DONE** (`2f97eba`)
 
-**Options:** `Microsoft.Extensions.Caching.Memory.MemoryCache` with size-based eviction, or a simple `ConcurrentDictionary` with manual LRU logic.
+- `IMemoryCache` injected into `TeamSuggestionService` (capacity 25 entries, ~5 MB, 10min TTL, size-based LRU eviction)
+- Per-role `RoleValueTable` cache key: `(role, rolePlayerIdsHash, slots, maxBudget, forcedPlayerId, currentRoleMateIdsHash, lineup, creditsDistribution, budgetAllocation)`
+- Per-role player hash (not global pool hash) → P/C/A entries survive when only a defender is purchased
+- Current role-mates included in Stage 1 scoring context → base and potential paths evaluate against the same role-unit composition (post-purchase score matches pre-purchase potential, gap 0.057 → 0.0007)
+- No explicit invalidation on team change — cache key encodes enough context; LRU handles eviction naturally
+
+**Impact:**
+- Within-request (3 paths): ~50% reduction (6 computed, 6 hits)
+- Across-request (post-purchase): ~75% reduction (P/C/A entries survive)
+
+**Phase 2 — Invalidation on import: Open**
+
+- Create `ICacheVersion` singleton service
+- Include version in cache key
+- Increment version in `PlayerService.ImportPlayersFromCsvAsync` after successful commit
+- Plan: `docs/suggestion-engine-caching-plan.md`
 
 ### Unit / Integration Tests
 
@@ -88,8 +103,9 @@ No auth is configured. Needed before exposing the API externally.
 
 | Date | Item | Status |
 |------|------|--------|
+| 2026-08-10 | Suggestion engine caching Phase 1 + uniform scoring | DONE (`2f97eba`) |
 | 2026-08-10 | Suggestion engine refactoring (math fixes + architecture) | DONE |
-| 2026-08-09 | Suggestion engine caching (tracked) | Planned |
+| 2026-08-09 | Suggestion engine caching (tracked) | Planned → superseded by Phase 1 |
 | 2026-08-08 | Role_M import + ReadDto exposure | DONE (`faddf05`) |
 | 2026-08-08 | Age import + ReadDto exposure | DONE (`faddf05`) |
 | 2026-08-08 | Nullable CSV fields (Age, MyRating, Mate, Regularness, ExpMf) | DONE (`faddf05`) |
