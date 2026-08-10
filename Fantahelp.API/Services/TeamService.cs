@@ -81,6 +81,9 @@ namespace Fantahelp.API.Services
             if (player == null)
                 return ServiceResult<Team>.FailureResult("No Player was found with the given teamId.");
 
+            if (team.RemainingBudget < teamPlayerCreateDto.PurchasePrice)
+                return ServiceResult<Team>.FailureResult("Insufficient remaining budget.");
+
             var teamPlayer = new TeamPlayer
             {
                 TeamId = teamId,
@@ -92,6 +95,7 @@ namespace Fantahelp.API.Services
                 LeagueId = team.LeagueId
             };
 
+            team.RemainingBudget -= teamPlayerCreateDto.PurchasePrice;
             team.Players.Add(teamPlayer);
             await _context.SaveChangesAsync();
 
@@ -108,6 +112,7 @@ namespace Fantahelp.API.Services
             if (player == null)
                 return ServiceResult<Team>.FailureResult("No Player was found with the given teamId.");
 
+            team.RemainingBudget += player.AuctionPrice;
             team.Players.Remove(player);
             await _context.SaveChangesAsync();
 

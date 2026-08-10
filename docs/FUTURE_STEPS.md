@@ -22,15 +22,28 @@ Track of pending work, ordered by priority.
 
 ---
 
-### AuctionedPlayer Scoring Logic ✅ DONE
+### Suggestion Engine — Completed Refactoring
 
-**Context:** The frontend sends `auctionedPlayer` (with `playerId` and `acquisitionPrice`) in the suggestion request to compute a "potential score" that includes this player.
+**Context:** The suggestion engine (`POST /api/teams/getOptimal`) underwent a comprehensive refactoring to fix mathematical anomalies (negative deltas at market price) and improve architecture. Full writeup: [`docs/suggestion-engine-refactoring.md`](suggestion-engine-refactoring.md).
 
-**Implementation:** When `AuctionedPlayer` is set, the service forces the player into the roster at the given acquisition price, deducts from budget and slots for that role, recomputes Stage 1 only for the affected role, and reuses cached tables for the other three roles. Both base and potential scores are returned in a single call via `SuggestionResult.PotentialScore`.
+| Area | Item | Status |
+|------|------|--------|
+| **Math** | Budget double-counting fix | **DONE** |
+| **Math** | Context-aware Stage 1 DP (forced player included in scoring) | **DONE** |
+| **Math** | Performance-based starter selection (ExpectedPerformance, not cost) | **DONE** |
+| **Arch** | Unified `ComputeSingleSuggestionAsync` pipeline | **DONE** |
+| **Arch** | Concurrent twin-run via `Task.WhenAll` | **DONE** |
+| **Arch** | `ScoringPlayer` record (MarketValue ≠ AcquisitionCost) | **DONE** |
+| **Arch** | `ScoringEngine` extraction (static class) | **DONE** |
+| **Arch** | DTO dual binding (`price` + `acquisitionPrice`) | **DONE** |
+| **Quality** | O(1) DP lookups (`playerById` dict) | **DONE** |
+| **Quality** | Structured logging (`ILogger`) | **DONE** |
+| **Quality** | Dead code removal | **DONE** |
 
-**Optimization:** Stage 1 DP tables (the expensive part) run once. Only the affected role's table is recomputed for the potential path. Stage 2+3 (cheap combination + backtrack) run twice.
-
-**Edge cases handled:** Player not found → `PotentialScore` is null. Acquisition price exceeds budget → `PotentialScore` is null.
+**Guarantees:**
+- Market price bid → $\Delta = 0.00$
+- Below-market bid → $\Delta > 0.00$
+- Overpaying → $\Delta < 0.00$
 
 ---
 
@@ -38,13 +51,9 @@ Track of pending work, ordered by priority.
 
 **Context:** The suggestion engine recomputes Stage 1 DP tables on every request (~1 MB, tens of ms). During live auctions, the frontend may fire rapid repeated calls with the same team state.
 
-**What to do:** Add an in-process LRU cache keyed by a hash of `(teamId, availablePlayerIds, teamComposition)`. Cache the Stage 1 `RoleValueTable` results per role. Invalidate when the team changes (player added/removed). Small capacity (5 entries, ~5 MB max) is sufficient — the within-request optimization already avoids redundant DP work for the auctioned player path.
+**What to do:** Add an in-process LRU cache keyed by a hash of `(teamId, availablePlayerIds, teamComposition)`. Cache the Stage 1 `RoleValueTable` results per role. Invalidate when the team changes (player added/removed). Small capacity (5 entries, ~5 MB max) is sufficient.
 
 **Options:** `Microsoft.Extensions.Caching.Memory.MemoryCache` with size-based eviction, or a simple `ConcurrentDictionary` with manual LRU logic.
-
----
-
-## Medium Priority
 
 ### Unit / Integration Tests
 
@@ -79,7 +88,7 @@ No auth is configured. Needed before exposing the API externally.
 
 | Date | Item | Status |
 |------|------|--------|
-| 2026-08-09 | AuctionedPlayer forced inclusion + single-call dual score | In progress |
+| 2026-08-10 | Suggestion engine refactoring (math fixes + architecture) | DONE |
 | 2026-08-09 | Suggestion engine caching (tracked) | Planned |
 | 2026-08-08 | Role_M import + ReadDto exposure | DONE (`faddf05`) |
 | 2026-08-08 | Age import + ReadDto exposure | DONE (`faddf05`) |
