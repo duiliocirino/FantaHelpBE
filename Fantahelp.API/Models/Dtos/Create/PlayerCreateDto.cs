@@ -12,6 +12,11 @@ public class PlayerCreateDto
     public float? MyRating { get; set; }
     public string? Mate { get; set; }
     public int? Regularness { get; set; }
+    /// <summary>
+    /// Injury-proneness consensus 1-5 (higher = more robust). CSV carries float notation
+    /// (e.g. "5.0"), hence float? here; null when ML has no consensus (never defaulted).
+    /// </summary>
+    public float? Integrity { get; set; }
     public int FVM { get; set; }
     public float? ExpMf { get; set; }
     public int ExpPrice { get; set; }

@@ -10,6 +10,8 @@ public class PlayerReadDto
     public double Rating { get; set; }
     public string? Mate { get; set; }
     public int Regularness { get; set; }
+    /// <summary>Injury-proneness consensus 1-5 (higher = more robust). Null when unknown.</summary>
+    public int? Integrity { get; set; }
     public int FVM { get; set; }
     public double ExpectedPerformance { get; set; }
     public double ExpectedStd { get; set; }

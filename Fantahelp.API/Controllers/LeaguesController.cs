@@ -140,6 +140,7 @@ namespace Fantahelp.API.Controllers
                 Price = p.Price,
                 Rating = p.Rating,
                 Regularness = p.Regularness,
+                Integrity = p.Integrity,
                 FVM = p.FVM,
                 ExpectedPerformance = p.ExpectedPerformance,
                 ExpectedStd = p.ExpectedStd,

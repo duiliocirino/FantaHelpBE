@@ -14,6 +14,7 @@ public static class PlayerMapper
                 Rating = player.Rating,
                 Mate = player.Mate,
                 Regularness = player.Regularness,
+                Integrity = player.Integrity,
                 FVM = player.FVM,
                 ExpectedPerformance = player.ExpectedPerformance,
                 ExpectedStd = player.ExpectedStd,

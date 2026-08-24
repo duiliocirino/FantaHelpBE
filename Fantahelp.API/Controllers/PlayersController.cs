@@ -38,6 +38,7 @@ namespace Fantahelp.API.Controllers
                 Rating = p.Rating,
                 Mate = p.Mate,
                 Regularness = p.Regularness,
+                Integrity = p.Integrity,
                 FVM = p.FVM,
                 ExpectedPerformance = p.ExpectedPerformance,
                 ExpectedStd = p.ExpectedStd,
@@ -69,6 +70,7 @@ namespace Fantahelp.API.Controllers
                 Rating = player.Rating,
                 Mate = player.Mate,
                 Regularness = player.Regularness,
+                Integrity = player.Integrity,
                 FVM = player.FVM,
                 ExpectedPerformance = player.ExpectedPerformance,
                 ExpectedStd = player.ExpectedStd,
@@ -77,32 +79,65 @@ namespace Fantahelp.API.Controllers
             return Ok(playerDto);
         }
 
+        // Per-format CSV file naming: players_{credits}_{starters}.csv (e.g. players_800_8.csv).
+        // The format is derived from the file name; the file content carries the data.
+        private static readonly System.Text.RegularExpressions.Regex FormatFileName =
+            new(@"^players_(\d+)_(\d+)\.csv$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+        /// <summary>
+        /// Imports a season from one or more per-format CSV files (form field <c>files</c>),
+        /// e.g. <c>players_800_8.csv</c>, <c>players_1000_8.csv</c>, <c>players_1000_10.csv</c>.
+        /// Destructive: replaces all players and per-format price rows.
+        /// </summary>
         [HttpPost("import")]
-        public async Task<IActionResult> ImportPlayersFromCsv(IFormFile file)
+        public async Task<IActionResult> ImportPlayersFromCsv(IFormFile[] files)
         {
-            if (file == null || file.Length == 0)
+            if (files == null || files.Length == 0)
             {
-                return BadRequest("No file uploaded.");
-            }
-            if (Path.GetExtension(file.FileName).ToLower() != ".csv")
-            {
-                return BadRequest("Invalid file type. Please upload a CSV file.");
+                return BadRequest("No files uploaded.");
             }
 
-            try
+            var importFiles = new List<PlayerImportFile>();
+            foreach (var file in files)
             {
-                // 1. Parse the CSV file into a list of DTOs
-                using var stream = file.OpenReadStream();
-                var playerDtos = CsvParser.ParsePlayers(stream);
-                // 2. Call the service to perform the import logic
-                await _playerService.ImportPlayersFromCsvAsync(playerDtos);
-                // 3. Return a success response
-                return Ok("Players imported successfully.");
+                if (file.Length == 0)
+                {
+                    return BadRequest($"File '{file.FileName}' is empty.");
+                }
+
+                var match = FormatFileName.Match(Path.GetFileName(file.FileName));
+                if (!match.Success)
+                {
+                    return BadRequest(
+                        $"File '{file.FileName}' does not match the expected naming 'players_{{credits}}_{{starters}}.csv' (e.g. players_800_8.csv).");
+                }
+
+                var credits = int.Parse(match.Groups[1].Value);
+                var starters = int.Parse(match.Groups[2].Value);
+                if (importFiles.Any(f => f.Credits == credits && f.Starters == starters))
+                {
+                    return BadRequest($"Duplicate format: multiple files uploaded for {credits}_{starters}.");
+                }
+
+                try
+                {
+                    // Parse each file into DTOs; a malformed CSV is a client error.
+                    using var stream = file.OpenReadStream();
+                    importFiles.Add(new PlayerImportFile(credits, starters, CsvParser.ParsePlayers(stream).ToList()));
+                }
+                catch (Exception ex)
+                {
+                    return BadRequest($"Failed to parse '{file.FileName}': {ex.Message}");
+                }
             }
-            catch (Exception ex)
-            {
-                return StatusCode(500, $"Internal server error: {ex.Message}");
-            }
+
+            // Call the service to perform the import logic.
+            var result = await _playerService.ImportPlayersFromCsvAsync(importFiles);
+            // The service rolls back internally on failure, so a non-success result
+            // means the database is unchanged. Report the error instead of a false success.
+            if (result.Success != true)
+                return StatusCode(500, result.ErrorMessage);
+            return Ok("Players imported successfully.");
         }
     }
 }

@@ -11,6 +11,7 @@ public class FantahelpContext : DbContext
     public DbSet<Team> Teams { get; set; }
     public DbSet<TeamPlayer> TeamPlayers { get; set; }
     public DbSet<Player> Players { get; set; }
+    public DbSet<PlayerPrice> PlayerPrices { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -41,5 +42,17 @@ public class FantahelpContext : DbContext
             .HasOne(tp => tp.League)
             .WithMany()
             .HasForeignKey(tp => tp.LeagueId);
+
+        // One expected-price row per player x league format (credits, starters).
+        // Rebuilt from scratch on every season import; cascade so a player wipe
+        // also removes its price rows.
+        modelBuilder.Entity<PlayerPrice>()
+            .HasKey(pp => new { pp.PlayerId, pp.Credits, pp.Starters });
+
+        modelBuilder.Entity<PlayerPrice>()
+            .HasOne(pp => pp.Player)
+            .WithMany(p => p.Prices)
+            .HasForeignKey(pp => pp.PlayerId)
+            .OnDelete(DeleteBehavior.Cascade);
     }
 }
