@@ -52,10 +52,21 @@ Track of pending work, ordered by priority.
 - FE is already compatible: `parseRegularnessValue` (`PlayerMapper.kt`) handles the 0-100 scale via its `else` branch.
 - **The `ScoringEngine` regularness formulas are calibrated on the 1-5 scale** (`5*(avg-4)` starters / `avg-3` subs) and MUST be re-derived before the %-scale import -- otherwise scores inflate by ~20x (e.g. a 90% starter would score `5*(90-4)=430`).
 
+**Done (2026-08-23):** percentage-native formulas in `ScoringEngine.ComputeStrategiesScore`:
+
+```csharp
+starters: (avgStarters% - 80) / 4   // 1 point per 4% of deviation from the 80% baseline
+subs:     (avgSubs% - 60) / 20      // 1 point per 20% of deviation from the 60% baseline
+```
+
+Anchors are percentage-native (starters 80% = reliable starter, subs 60% = reliable sub); the slopes preserve the magnitude of the legacy 1-5 formulas (`5*(avg-4)` / `(avg-3)`) under the 1↔20% ... 5↔100% mapping, so the relative tuning of the other strategy terms is unchanged. The slopes are one-line knobs if re-tuning.
+
+**Verified:** with data rescaled ×20 (1-5 → 20-100), the new formulas produce a **bit-identical** total score and identical suggested players to the legacy formulas on the original 1-5 data. Real %-scale files (0-95, multiples of 5) imported and scored sanely (35.14 vs 35.59 baseline -- the gap is the real distribution, e.g. bench players at 0%).
+
 | Item | Status |
 |---|---|
-| Re-derive `ScoringEngine` regularness formulas for 0-100 | **OPEN -- must land before the %-scale import**. Proposed: starters `0.25*(avg-80)`, subs `(avg-60)/20` -- mathematically exact under the 1↔20% ... 5↔100% mapping, extends linearly to the new 0 value. |
-| Validate %-scale distribution on import (spot-check: Barella ~90, Dybala ~65, bench 0) | OPEN |
+| Percentage-native `ScoringEngine` regularness formulas | **DONE** |
+| Validate %-scale distribution on import (spot-check: Barella ~90, Dybala ~65, bench 0) | **DONE** (0-95, filled 515/515, real spread) |
 
 ---
 
@@ -69,10 +80,14 @@ Track of pending work, ordered by priority.
 - Triggers: team roster mutation (add/remove player) -> invalidate + recompute (debounced, superseded runs cancelled); player import -> invalidate all.
 - `getOptimal` fast path: exact state match in cache -> return immediately.
 
-| Item | Status |
-|---|---|
-| Design sign-off (base-state only? in-memory only? triggers?) | OPEN |
-| Implementation | OPEN |
+**Design decisions (signed off 2026-08-23):** base state only (no auctionedPlayer); in-memory only (single instance); triggers on roster mutation + player import (manual league changes are rare -- the FE's next request refreshes anyway).
+
+**Done (2026-08-23):**
+- `ITeamPrecomputer` / `TeamPrecomputer` (singleton): dedicated result cache (10-min TTL, aligned with the DP cache) keyed by `(dataVersion, teamId, leagueId, roster, lineup, creditsDistribution, numTeams, favorites, budgetAllocation)`; per-team last-request memory; debounced (500ms) recompute with cancellation of superseded runs, running the normal pipeline in its own DI scope.
+- `TeamSuggestionService`: fast path returns the cached base-state result (measured 11-16ms vs ~1-4s full run); stores the result of every base-state run (auctioned runs never touch the cache).
+- Triggers: `TeamService.AddPlayerToTeamAsync` / `RemovePlayerFromTeamAsync` → `NotifyTeamRosterChanged`; `PlayerService.ImportPlayersFromCsvAsync` → `NotifyPlayerDataChanged` (bumps the data version, which is part of the cache key, so a re-import can never return a stale result even when player ids are reused across seasons).
+
+**Verified:** repeated base call 16ms with identical result; add/remove player → debounced recompute → next call 11ms; import → invalidation + recompute; auction path unaffected (potential/without scores computed, never cached).
 
 ---
 
