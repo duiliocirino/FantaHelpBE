@@ -18,7 +18,28 @@ Track of pending work, ordered by priority.
 | `Age` | **DONE** | Added to `PlayerCreateDto`, mapped through to `Player` entity. Exposed in `PlayerReadDto`. |
 | `Mate` | Open | Stored as mate's **name** (string). Fragile: names are ambiguous ("Ederson D.s."), change over time. Consider storing as **player ID** (`MateId int?`) instead. |
 
-**Mate detail:** Currently stored as player name string. Open question: should BE resolve names to IDs post-import (two-pass), or should ML output mate's SkyBet ID directly?
+**Mate detail:** Currently stored as player name string. Open question: should BE resolve names to IDs post-import (two-pass), or should ML output mate's SkyBet ID directly.
+
+### Per-Format Prices (26-27+ contract)
+
+**Context:** From 26-27, ML produces one CSV per league format (`players_{credits}_{starters}.csv`); `expprice`/`expstd` are format-specific. The BE now stores them in the `PlayerPrice` table (one row per player x format) and the suggestion engine resolves the league's format from `(League.InitialBudget, lineup total starters)` -- exact match, else closest by credits then starters. `Player.ExpectedPrice`/`ExpectedStd` are a deprecated bridge, populated at import from the reference format **800_8**.
+
+**Done (26-27 import readiness):**
+
+| Item | Status |
+|---|---|
+| `Player.Integrity` nullable int (1-5, null = unknown) | **DONE** |
+| `PlayerPrice` table (design B: player x format) + migration | **DONE** |
+| Multi-file import (`files` form field, format from file name, cross-file consistency check) | **DONE** |
+| Suggestion engine format-aware pricing (+ format in DP cache key) | **DONE** |
+
+**Open:**
+
+| Item | Detail |
+|---|---|
+| Format-aware read endpoints | `GET /api/players` / `GET /api/leagues/{id}/players` always return the bridge (800_8) values. Add a format query param (FE coordination) so the FE can display per-format expected prices. |
+| Remove bridge columns | Drop `Player.ExpectedPrice`/`ExpectedStd` once the FE consumes per-format data. Requires FE migration + a migration. |
+| FE: `integrity` display | `PlayerReadDto.integrity` is exposed; FE can show the robustness consensus (null = unknown). |
 
 ---
 
@@ -91,6 +112,23 @@ No auth is configured. Needed before exposing the API externally.
 
 ---
 
+## Performance Improvements
+
+### TeamSuggestionService optimisation
+
+See `docs/performance-improvements.md` for detailed analysis, bottleneck list and proposed improvements.
+
+**Status:** Tracking. No implementation yet.
+
+**Next steps:**
+- Apply tighter per-role budget caps
+- Candidate pruning per role
+- Score memoisation
+
+Reference: `docs/performance-improvements.md`
+
+---
+
 ## Low Priority
 
 ### Unused Imports
@@ -103,6 +141,7 @@ No auth is configured. Needed before exposing the API externally.
 
 | Date | Item | Status |
 |------|------|--------|
+| 2026-08-23 | 26-27 per-format contract: `Player.Integrity`, `PlayerPrice` table, multi-file import, format-aware suggestion pricing | DONE |
 | 2026-08-10 | Suggestion engine caching Phase 1 + uniform scoring | DONE (`2f97eba`) |
 | 2026-08-10 | Suggestion engine refactoring (math fixes + architecture) | DONE |
 | 2026-08-09 | Suggestion engine caching (tracked) | Planned → superseded by Phase 1 |

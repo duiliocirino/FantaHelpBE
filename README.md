@@ -226,7 +226,7 @@ podman exec -it fantahelp-postgres psql -U fantahelp -d FantacalcioDb
 |--------|----------|-------------|
 | GET | `/api/players` | Get all players |
 | GET | `/api/players/{id}` | Get player by ID |
-| POST | `/api/players/import` | Import players from CSV (wipes existing data) |
+| POST | `/api/players/import` | Import players from per-format CSVs `players_{credits}_{starters}.csv` (wipes existing data) |
 
 ### Teams
 
@@ -303,7 +303,7 @@ When the frontend sends `auctionedPlayer: { playerId, acquisitionPrice }` in the
 
 - **No authentication/authorization** -- the User model exists with a Password field, but no auth middleware is configured
 - **No tests** -- no unit or integration test project exists
-- **CSV import is destructive** -- `POST /api/players/import` wipes all existing players before importing
+- **CSV import is destructive** -- `POST /api/players/import` wipes all existing players and per-format price rows before importing (26-27+: one `players_{credits}_{starters}.csv` per format, e.g. `players_800_8.csv`)
 - **Caching Phase 2** -- DP table cache is implemented (Phase 1). Phase 2: invalidate cache on player re-import via a version token service
 - **No background jobs** -- heavy computations block the request thread
 - **Frontend is separate** -- this repo is backend-only

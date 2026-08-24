@@ -47,20 +47,26 @@ dotnet run --project Fantahelp.API
 ```
 Default ports: HTTP `http://localhost:60001`, HTTPS `https://localhost:60000`. Swagger at HTTPS + `/swagger`.
 
+> **Known environment issue (as of 2026-08-23):** the default `dotnet` on PATH (`/snap/bin/dotnet`, the `dotnet` snap) has a broken targeting pack (`MSB4018 ... FrameworkList.xml` not found). Use the intact `dotnet-sdk-90` snap instead:
+> `/snap/dotnet-sdk-90/current/usr/lib/dotnet/dotnet build|run|...`
+
 See README.md for the full Quick Start and Full Setup guides.
 
 ---
 
-## ML Pipeline Contract
+## ML Pipeline Contract (26-27+)
 
-The ML pipeline (FantaHelpML repo) produces `data/final/{season}/players.csv`. The BE imports it via `POST /api/players/import`.
+The ML pipeline (FantaHelpML repo) produces **one CSV per league format** in `data/final/{season}/`:
+`players_800_8.csv`, `players_1000_8.csv`, `players_1000_10.csv`. The BE imports them via `POST /api/players/import` (form field `files`, one entry per file). The format is derived from the file name.
 
-**Import is destructive** — `PlayerService.ImportPlayersFromCsvAsync` wipes all existing players before inserting.
+**Import is destructive** — `PlayerService.ImportPlayersFromCsvAsync` wipes all existing players **and** `PlayerPrice` rows before inserting. It validates that all files cover the same player ids with identical base data (only `expprice`/`expstd` may differ) and fails fast otherwise.
 
-**CSV headers** (case-insensitive match via CsvHelper):
-`id, role, role_m, name, squad, price, age, myrating, mate, regularness, fvm, expmf, expprice, expstd`
+**CSV headers** (case-insensitive match via CsvHelper), 15 columns:
+`id, role, role_m, name, squad, price, age, myrating, mate, regularness, integrity, fvm, expmf, expprice, expstd`
 
-**Nullable fields:** Age, MyRating, Mate, Regularness, ExpMf may be empty for players without historical stats. The DTO uses nullable types with `?? 0` fallbacks in the service mapping.
+**Nullable fields:** Age, MyRating, Mate, Regularness, ExpMf, Integrity may be empty. The DTO uses nullable types with `?? 0` fallbacks in the service mapping — **except `Integrity`, where null stays null** (1-5 consensus, null = unknown, never a default).
+
+**Per-format prices:** `expprice`/`expstd` are format-specific and land in the `PlayerPrice` table (one row per player × format). `Player.ExpectedPrice`/`ExpectedStd` are a deprecated bridge, populated at import from the reference format **800_8**. The suggestion engine resolves the league format from `(League.InitialBudget, lineup total starters)` — exact match, else closest by credits then starters.
 
 **Role_M parsing:** ML outputs sub-positions as semicolon-separated string (e.g., `M;C`, `B;Ds;E`). Service splits on `;` into `List<string>`. Falls back to `[Role]` if empty.
 
