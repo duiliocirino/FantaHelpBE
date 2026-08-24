@@ -43,6 +43,39 @@ Track of pending work, ordered by priority.
 
 ---
 
+### Regularness 0-100 scale (26-27+)
+
+**Context:** From the 26-27 season ML ships `regularness` as the **expected starting % (0-100, multiples of 5)** instead of int 1-5 (source: LLM squad assessment; the community 1-5 consensus is now the validation anchor, not the data source). The refreshed %-scale files ship with the post-market Quotazioni refresh -- a single import, no double import.
+
+**Impact assessment (2026-08-23):**
+- No schema/DTO change: `Player.Regularness` is `int`, 0-100 fits. The import `?? 0` fallback is now a real value (bench player), not a missing-data marker.
+- FE is already compatible: `parseRegularnessValue` (`PlayerMapper.kt`) handles the 0-100 scale via its `else` branch.
+- **The `ScoringEngine` regularness formulas are calibrated on the 1-5 scale** (`5*(avg-4)` starters / `avg-3` subs) and MUST be re-derived before the %-scale import -- otherwise scores inflate by ~20x (e.g. a 90% starter would score `5*(90-4)=430`).
+
+| Item | Status |
+|---|---|
+| Re-derive `ScoringEngine` regularness formulas for 0-100 | **OPEN -- must land before the %-scale import**. Proposed: starters `0.25*(avg-80)`, subs `(avg-60)/20` -- mathematically exact under the 1↔20% ... 5↔100% mapping, extends linearly to the new 0 value. |
+| Validate %-scale distribution on import (spot-check: Barella ~90, Dybala ~65, bench 0) | OPEN |
+
+---
+
+### Precompute optimal teams per team state
+
+**Context:** During live auctions the FE repeatedly calls `POST /api/teams/getOptimal`; the first call for a state pays the full DP cost (~0.8-1.5s). Goal: always keep the optimal team precomputed for each team's current state and re-trigger on state changes (e.g. a player is added/removed from the team).
+
+**Planned design (draft, pending sign-off):**
+- Result cache (IMemoryCache) keyed by `(teamId, stateHash)` where state = roster + lineup + creditsDistribution + numTeams + favorites. Precompute the **base state** (no auctionedPlayer) -- the auctioned player changes constantly during an auction and is already cheap thanks to the shared DP tables.
+- Remember the last requested params per team (captured from `getOptimal`) so the precomputer knows *what* to compute for that team.
+- Triggers: team roster mutation (add/remove player) -> invalidate + recompute (debounced, superseded runs cancelled); player import -> invalidate all.
+- `getOptimal` fast path: exact state match in cache -> return immediately.
+
+| Item | Status |
+|---|---|
+| Design sign-off (base-state only? in-memory only? triggers?) | OPEN |
+| Implementation | OPEN |
+
+---
+
 ### Suggestion Engine — Completed Refactoring
 
 **Context:** The suggestion engine (`POST /api/teams/getOptimal`) underwent a comprehensive refactoring to fix mathematical anomalies (negative deltas at market price) and improve architecture. Full writeup: [`docs/suggestion-engine-refactoring.md`](suggestion-engine-refactoring.md).
