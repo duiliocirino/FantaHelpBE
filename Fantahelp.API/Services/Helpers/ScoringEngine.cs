@@ -175,18 +175,26 @@ namespace Fantahelp.API.Services
                         }
                     }
             }
-            //                            --- Regularness ---
+            /*                          --- Regularness ---
+            Percentage-native (26-27+ contract): regularness is the expected starting %
+            (0-100, multiples of 5), not a 1-5 rating. Each group is scored against its
+            own baseline: starters 80% (reliable starter), subs 60% (reliable sub).
+            Slopes: 1 point per 4% of deviation for starters, 1 point per 20% for subs.
+            (These preserve the magnitude of the legacy 1-5 formulas 5*(avg-4) / (avg-3)
+            under the 1<->20% ... 5<->100% mapping, so the relative tuning of the other
+            strategy terms is unchanged; the slopes are one-line knobs if re-tuning.)
+            */
             {
                 if (starters.Count > 0)
                 {
                     var regularnessStarters = starters.Average(p => p.Regularness);
-                    regularnessStartersScore = 5 * (regularnessStarters - 4);
+                    regularnessStartersScore = (regularnessStarters - 80) / 4;
                 }
 
                 if (subs.Count > 0)
                 {
                     var regularnessSubs = subs.Average(p => p.Regularness);
-                    regularnessSubsScore = regularnessSubs - 3;
+                    regularnessSubsScore = (regularnessSubs - 60) / 20;
                 }
             }
             //                            --- Team Bonuses ---
