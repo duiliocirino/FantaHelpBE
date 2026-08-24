@@ -6,11 +6,13 @@ namespace Fantahelp.API.Services
     public class TeamService : ITeamService
     {
         private readonly FantahelpContext _context;
+        private readonly ITeamPrecomputer _precomputer;
 
         // The DbContext is "injected" into the service via the constructor.
-        public TeamService(FantahelpContext context)
+        public TeamService(FantahelpContext context, ITeamPrecomputer precomputer)
         {
             _context = context;
+            _precomputer = precomputer;
         }
 
         public async Task<ServiceResult<IEnumerable<Team>>> GetAllTeamsAsync()
@@ -99,6 +101,9 @@ namespace Fantahelp.API.Services
             team.Players.Add(teamPlayer);
             await _context.SaveChangesAsync();
 
+            // Roster changed: refresh the precomputed optimal team for this team.
+            _precomputer.NotifyTeamRosterChanged(teamId);
+
             return ServiceResult<Team>.SuccessResult(team);
         }
 
@@ -115,6 +120,9 @@ namespace Fantahelp.API.Services
             team.RemainingBudget += player.AuctionPrice;
             team.Players.Remove(player);
             await _context.SaveChangesAsync();
+
+            // Roster changed: refresh the precomputed optimal team for this team.
+            _precomputer.NotifyTeamRosterChanged(teamId);
 
             return ServiceResult<Team>.SuccessResult(team);
         }

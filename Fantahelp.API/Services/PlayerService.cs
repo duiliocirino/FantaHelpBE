@@ -5,11 +5,13 @@ namespace Fantahelp.API.Services
     public class PlayerService : IPlayerService
     {
         private readonly FantahelpContext _context;
+        private readonly ITeamPrecomputer _precomputer;
 
         // The DbContext is "injected" into the service via the constructor.
-        public PlayerService(FantahelpContext context)
+        public PlayerService(FantahelpContext context, ITeamPrecomputer precomputer)
         {
             _context = context;
+            _precomputer = precomputer;
         }
 
         public async Task<ServiceResult<IEnumerable<Player>>> GetAllPlayersAsync()
@@ -110,6 +112,9 @@ namespace Fantahelp.API.Services
                 await _context.SaveChangesAsync();
                 // If everything was successful, commit the transaction.
                 await transaction.CommitAsync();
+
+                // Player data changed: invalidate every precomputed result and refresh known teams.
+                _precomputer.NotifyPlayerDataChanged();
             }
             catch (Exception ex) {
                 // If something went wrong, roll back the transaction.

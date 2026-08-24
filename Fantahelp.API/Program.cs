@@ -24,6 +24,10 @@ builder.Services.AddScoped<ILeagueService, LeagueService>();
 builder.Services.AddScoped<IUserService, UserService>();
 builder.Services.AddScoped<ITeamSuggestionService, TeamSuggestionService>();
 
+// Singleton: holds cross-request state (per-team params, data version, result cache) for
+// the optimal-team precompute. See TeamPrecomputer.
+builder.Services.AddSingleton<ITeamPrecomputer, TeamPrecomputer>();
+
 builder.Services.AddMemoryCache(options =>
 {
     options.SizeLimit = 25; // Max 25 DP table entries (~5 MB)

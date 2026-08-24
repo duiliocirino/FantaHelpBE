@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
@@ -8,15 +10,17 @@ namespace Fantahelp.API.Services
     {
         private readonly FantahelpContext _context;
         private readonly ILeagueService _leagueService;
+        private readonly ITeamPrecomputer _precomputer;
         private readonly ILogger<TeamSuggestionService> _logger;
         private readonly IMemoryCache _cache;
 
         private const int CacheCapacity = 25;
 
-        public TeamSuggestionService(FantahelpContext context, ILeagueService leagueService, ILogger<TeamSuggestionService> logger, IMemoryCache cache)
+        public TeamSuggestionService(FantahelpContext context, ILeagueService leagueService, ITeamPrecomputer precomputer, ILogger<TeamSuggestionService> logger, IMemoryCache cache)
         {
             _context = context;
             _leagueService = leagueService;
+            _precomputer = precomputer;
             _logger = logger;
             _cache = cache;
         }
@@ -51,6 +55,21 @@ namespace Fantahelp.API.Services
 
             if (team == null)
                 return ServiceResult<List<SuggestionResult>>.FailureResult("No Team was found with the given teamId.");
+
+            // --- PRECOMPUTE FAST PATH ---
+            // Base-state requests (no auctioned player) return the precomputed result when
+            // the team state (roster + params + player-data version) is unchanged.
+            string? resultCacheKey = null;
+            if (suggestionRequest.AuctionedPlayer == null)
+            {
+                resultCacheKey = BuildResultCacheKey(team, suggestionRequest);
+                var cached = _precomputer.GetCachedResult(resultCacheKey);
+                if (cached != null)
+                {
+                    _logger.LogInformation("Returning precomputed optimal team for team {TeamId}.", team.Id);
+                    return ServiceResult<List<SuggestionResult>>.SuccessResult([cached]);
+                }
+            }
 
             // --- PRICE FORMAT RESOLUTION ---
             // A league's format is (total credits, starters). Scoring uses the format-specific
@@ -134,6 +153,12 @@ namespace Fantahelp.API.Services
             var potentialResult = await potentialTask;
             var withoutResult = await withoutTask;
 
+            // --- PRECOMPUTE STORE ---
+            // Only base-state runs are cached; auctioned runs attach Potential/Without scores
+            // in-place, which must never leak into a cached base result.
+            if (suggestionRequest.AuctionedPlayer == null && resultCacheKey != null)
+                _precomputer.StoreResult(team.Id, resultCacheKey, suggestionRequest, baseResult);
+
             if (potentialResult != null)
             {
                 baseResult.PotentialScore = new PotentialSuggestionResult
@@ -157,6 +182,35 @@ namespace Fantahelp.API.Services
             }
 
             return ServiceResult<List<SuggestionResult>>.SuccessResult([baseResult]);
+        }
+
+        /// <summary>
+        /// Cache key for a precomputed base-state result: player-data version, team, league,
+        /// roster (sorted player ids) and every request param that influences the result.
+        /// Roster and version in the key make a stale hit impossible: a mutation or an import
+        /// always produces a different key, even when player ids are reused across seasons.
+        /// </summary>
+        private string BuildResultCacheKey(Team team, SuggestionRequest request)
+        {
+            var roster = string.Join(",", team.Players.Select(tp => tp.PlayerId).OrderBy(id => id));
+            var favorites = string.Join(",", request.FavoritePlayerIds.OrderBy(id => id));
+            var lineup = request.LineUp;
+            var allocation = request.BudgetAllocation is { } a
+                ? $"{a.Goalkeepers}|{a.Defenders}|{a.Midfielders}|{a.Attackers}"
+                : "default";
+
+            var payload = string.Join("|",
+                _precomputer.DataVersion,
+                team.Id,
+                team.LeagueId,
+                roster,
+                $"{lineup.Keepers}.{lineup.Defenders}.{lineup.Midfielders}.{lineup.Attackers}",
+                request.CreditsDistribution,
+                request.NumTeams,
+                favorites,
+                allocation);
+
+            return $"optimal:{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload))[..16]).ToLowerInvariant()}";
         }
 
         /// <summary>
