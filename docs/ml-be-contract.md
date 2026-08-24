@@ -12,7 +12,7 @@ From the 26-27 season the contract changed as follows (single `players.csv` -> p
 |---|---|
 | **One CSV per league format** | `players_800_8.csv`, `players_1000_8.csv`, `players_1000_10.csv` (same 15 columns each). `expprice`/`expstd` are format-specific; all other columns must be identical across files. |
 | **New nullable column `integrity`** | 15th column, after `regularness`. Injury-proneness consensus, 1-5 (higher = more robust). Null when no consensus -- the BE stores null, never a default. |
-| **`mate` / `regularness` populated** | `regularness` (titolarità 1-5) for all players; `mate` (ballottaggio partner) sparse by design. |
+| **`mate` / `regularness` populated** | `regularness` (titolarità 1-5) for all players; `mate` (ballottaggio partner) sparse by design. `mate` is **not always symmetric**: the third player in a 3-way rotation points one-way at the pair they rotate with (26-27: 170 strict symmetric pairs + 6 one-way links). Treat as purely informational -- no logic may depend on symmetry (confirmed by ML, 2026-08-23). |
 | **Per-format prices in the BE** | New `PlayerPrice` table: one row per player x format (see §1.1). `Player.ExpectedPrice`/`ExpectedStd` are kept as a deprecated bridge populated from the reference format **800_8** at import. |
 
 **Import endpoint (26-27+):** `POST /api/players/import` with form field `files` (multiple):
@@ -47,7 +47,7 @@ Sections below describe the base contract; where the 26-27 update differs, this 
 | 6 | `Price` | `int` | No | CSV | Official SkySport quotation |
 | 7 | `Age` | `int` (0-100) | No | CSV | Player age. Imported from CSV. Defaults to 0 if absent. |
 | 8 | `Rating` | `double` (0-5) | No | CSV as `MyRating` | Custom rating from preprocessing |
-| 9 | `Mate` | `string` | **Yes** | CSV | Mate player name (empty string = no mate) |
+| 9 | `Mate` | `string` | **Yes** | CSV | Mate player name (empty string = no mate). Can be a one-way link (third man in a 3-way ballottaggio); informational only, symmetry not guaranteed. |
 | 10 | `Regularness` | `int` | No | CSV | Injury risk indicator |
 | 11 | `FVM` | `int` | No | CSV | Market value rating |
 | 12 | `ExpectedPerformance` | `double` | No | CSV as `ExpMf` | **ML-predicted mean fantasy score**. Core input to suggestion engine. |
