@@ -5,16 +5,25 @@ namespace Fantahelp.API.Services
     ///
     /// Total = (StarterWeight·S + BenchWeight·B + StrategyWeight·T) / 10
     ///
-    /// S (starters): match-day performance — sum of the effective expected performance of
-    ///   the starters, plus the back-4 defense bonus for 4+DEF lineups (threshold on the
-    ///   base performance, without the goal-bonus adjustment).
-    /// B (bench): rotation depth — sum of the per-role bench/starter performance ratios
-    ///   (structurally 0-4).
-    /// T (strategy): reliability + personal preferences — regularness against baseline,
-    ///   mates, graduated same-club penalty, credit spread.
+    /// Player value: V = ExpectedPerformance × (regularness/100)^α × integrity tilt,
+    /// with α = ReliabilityWeight/10 (0 = pure quality-when-playing, 1 = full expected
+    /// contribution) and tilt = 1 + 0.03·(ReliabilityWeight/10)·(integrity−3), null → 1.
+    /// expmf is the quality WHEN PLAYING (start probability not included) and the market
+    /// price already reflects availability, so V is the expected contribution a player
+    /// actually delivers per fixture — this is what both blocks score.
     ///
-    /// Weights come from SuggestionRequest.Weights (optional; defaults 6/3/1 reproduce the
-    /// legacy 0.6/0.3/0.1 block calibration).
+    /// S (starters): sum of V of the starters, plus the back-4 defense bonus for 4+DEF
+    ///   lineups (threshold on the base performance, without the goal-bonus adjustment).
+    /// B (bench): BenchRotationFactor × sum of V of the bench players. The rotation
+    ///   factor (< 1) reflects that a bench player only plays a fraction of fixtures for
+    ///   the team; it also keeps the S/B weight ratio a real line-vs-bench trade-off
+    ///   (without it, line and bench points are worth the same and the engine always
+    ///   buys the top-V players, making BenchWeight degenerate).
+    /// T (strategy): personal preferences — mates, graduated same-club penalty,
+    ///   credit spread.
+    ///
+    /// Weights come from SuggestionRequest.Weights (optional; block defaults 6/3/1
+    /// reproduce the legacy 0.6/0.3/0.1 block calibration, reliability defaults to 10).
     ///
     /// League goal bonus (League.GoalBonusPerRole) is NOT a score term: it is a market
     /// adjustment applied up-front via EffectiveExpectedPerformance / EffectiveMarketPrice /
@@ -60,9 +69,11 @@ namespace Fantahelp.API.Services
         {
             var weights = suggestionRequest.Weights ?? new StrategyWeights();
 
+            // Starters/bench split per role by reliable value V (consistent with the
+            // objective the DP optimizes).
             var playersByRole = players
                 .GroupBy(p => p.Role)
-                .ToDictionary(g => g.Key, g => g.OrderByDescending(p => p.ExpectedPerformance).ToList());
+                .ToDictionary(g => g.Key, g => g.OrderByDescending(p => ReliableValue(p, weights)).ToList());
 
             List<ScoringPlayer> starters = [];
             List<ScoringPlayer> subs = [];
@@ -93,8 +104,8 @@ namespace Fantahelp.API.Services
                 }
             }
 
-            double startingScore = ComputeStarterContribution(starters, suggestionRequest.LineUp);
-            double subsScore = ComputeSubContribution(subs, starters);
+            double startingScore = ComputeStarterContribution(starters, suggestionRequest.LineUp, weights);
+            double subsScore = ComputeSubContribution(subs, weights);
             double strategyScore = ComputeStrategiesScore(starters, subs, suggestionRequest, weights);
 
             return new Score
@@ -108,7 +119,7 @@ namespace Fantahelp.API.Services
             };
         }
 
-        private static double ComputeStarterContribution(List<ScoringPlayer> players, LineUp lineUp)
+        private static double ComputeStarterContribution(List<ScoringPlayer> players, LineUp lineUp, StrategyWeights weights)
         {
             int bonusDefense = 0;
 
@@ -141,35 +152,31 @@ namespace Fantahelp.API.Services
                 }
             }
 
-            double score = players.Sum(p => p.ExpectedPerformance) + bonusDefense;
+            double score = players.Sum(p => ReliableValue(p, weights)) + bonusDefense;
             return score;
         }
 
-        private static double ComputeSubContribution(List<ScoringPlayer> subs, List<ScoringPlayer> starters)
+        /// <summary>
+        /// Share of a bench player's reliable value that the team actually receives:
+        /// a bench player only plays a fraction of fixtures (rotation + injury cover).
+        /// Calibrated to 0.5 ("plays about half the fixtures"). Single tunable constant;
+        /// expose as a league/user setting if real-world calibration suggests.
+        /// </summary>
+        private const double BenchRotationFactor = 0.5;
+
+        private static double ComputeSubContribution(List<ScoringPlayer> subs, StrategyWeights weights)
         {
-            double sumRatio = 0;
-
-            foreach (var role in Roles)
-            {
-                var startersRole = starters.Where(p => p.Role == role).ToList();
-                var subsRole = subs.Where(p => p.Role == role).ToList();
-
-                double startersAvg = startersRole.Count > 0 ? startersRole.Average(p => p.ExpectedPerformance) : 0;
-                double subsAvg = subsRole.Count > 0 ? subsRole.Average(p => p.ExpectedPerformance) : 0;
-
-                // Avoid division by zero
-                double ratio = (startersAvg > 0) ? (subsAvg / startersAvg) : 0;
-                sumRatio += ratio;
-            }
-
-            return sumRatio;
+            // Bench = rotation factor × sum of the reliable value of the bench players:
+            // absolute rotation depth in expected points, correct direction under budget
+            // pressure (unlike the old bench/starter ratio, which measured the pool's
+            // talent curve and rose when the line got cheaper).
+            return BenchRotationFactor * subs.Sum(p => ReliableValue(p, weights));
         }
 
         private static double ComputeStrategiesScore(List<ScoringPlayer> starters, List<ScoringPlayer> subs,
             SuggestionRequest suggestionRequest, StrategyWeights weights)
         {
             double startersSpreadCreditsScore = 0;
-            double regularnessScore = 0;
             double mateScore = 0;
             double sameTeamScore = 0;
 
@@ -197,28 +204,8 @@ namespace Fantahelp.API.Services
                     }
                 }
             }
-            /*                          --- Regularness ---
-            Percentage-native (26-27+ contract): regularness is the expected starting %
-            (0-100, multiples of 5). Each group is scored against its own baseline:
-            starters 80% (reliable starter), subs 60% (reliable sub). Slopes: 1 point per
-            4% of deviation for starters, 1 point per 20% for subs. The whole block is
-            scaled by ReliabilityWeight/5 (5 = neutral = legacy behavior).
-            */
-            {
-                if (starters.Count > 0)
-                {
-                    var regularnessStarters = starters.Average(p => p.Regularness);
-                    regularnessScore += (regularnessStarters - 80) / 4;
-                }
-
-                if (subs.Count > 0)
-                {
-                    var regularnessSubs = subs.Average(p => p.Regularness);
-                    regularnessScore += (regularnessSubs - 60) / 20;
-                }
-
-                regularnessScore *= weights.ReliabilityWeight / 5.0;
-            }
+            // Regularness is NOT a T term: it is part of every player's reliable value V
+            // (see ReliableValue), where it has real decision weight in both S and B.
             //                            --- Team Bonuses ---
             {
                 // MATES: points per starter whose mate sits on the bench (MateWeight).
@@ -240,12 +227,31 @@ namespace Fantahelp.API.Services
                     .Sum(g => Math.Max(0, g.Count() - 3));
                 sameTeamScore = -weights.SquadDiversity / 5.0 * (sameClubInRole + 2 * sameClubTeamWide);
             }
-            // Final Sum (the goal bonus is no longer a score term: it is applied to the
-            // effective value/price of each player before scoring).
-            double strategyScore = regularnessScore + mateScore + sameTeamScore
+            // Final Sum (the goal bonus and reliability are not score terms: they are
+            // applied to each player's value before scoring).
+            double strategyScore = mateScore + sameTeamScore
                 + suggestionRequest.CreditsDistribution * startersSpreadCreditsScore;
 
             return strategyScore;
+        }
+
+        /// <summary>
+        /// Reliable value of a player: expected contribution per fixture.
+        /// V = ExpectedPerformance × (regularness/100)^α × integrity tilt, with
+        /// α = ReliabilityWeight/10 and tilt = 1 + 0.03·α·(integrity−3) (null → 1).
+        /// expmf is the quality when playing (start probability not included, by ML
+        /// contract) and the market price already reflects availability, so the
+        /// regularness factor converts quality into expected contribution without
+        /// double-counting the price side. α=0 recovers pure quality-when-playing;
+        /// α=1 (ReliabilityWeight 10) is the economically consistent value.
+        /// </summary>
+        private static double ReliableValue(ScoringPlayer p, StrategyWeights weights)
+        {
+            double alpha = weights.ReliabilityWeight / 10.0;
+            double value = p.ExpectedPerformance * Math.Pow(p.Regularness / 100.0, alpha);
+            if (p.Integrity.HasValue)
+                value *= 1.0 + 0.03 * alpha * (p.Integrity.Value - 3);
+            return value;
         }
 
         /// <summary>

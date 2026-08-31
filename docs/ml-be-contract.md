@@ -66,6 +66,10 @@ Sections below describe the base contract; where the 26-27 update differs, this 
 | `ExpectedStd` | `TeamSuggestionService` (backtrack) | Per-player price std. Aggregated as `sqrt(sum(std^2))` into `TotalExpectedPriceStd` per suggested team. |
 | All three | `PlayerReadDto` (API response) | Exposed via `GET /api/players` and nested inside league responses. FE reads them. |
 
+**Semantics notes (verified against the ML pipeline, 2026-08-24):**
+- `expmf` is the expected performance **when playing** — it contains no start-probability content (flat across regularness buckets, e.g. D: 5.93 at reg 0 → 6.16 at reg 80+). Availability is carried by `regularness` and by the market price (which prices availability strongly: D mean price 1.6cr reg-0 → 19.0cr reg-80+). The engine therefore applies the regularness discount itself (see `FUTURE_STEPS.md` → Reliability-Aware Player Value).
+- `expstd` is the **std of observed auction prices** (ML `pipeline/price_models.py`, clipped [1,150]) — price-uncertainty, not on-pitch reliability. Correlation with `integrity` is 0.005. Do not use it as a reliability/risk signal in scoring or FE display of "form stability"; if the FE shows it, label it price volatility.
+
 ### 1.1 PlayerPrice Entity (26-27+, per-format prices)
 
 **File:** `Fantahelp.API/Models/PlayerPrice.cs`

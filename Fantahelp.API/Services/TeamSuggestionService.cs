@@ -115,7 +115,7 @@ namespace Fantahelp.API.Services
                         var forcedMarket = ResolveMarketPrice(priceLookup, forcedPlayer);
                         var forcedScoringPlayer = new ScoringPlayer(
                             Id: forcedPlayer.Id, Name: forcedPlayer.Name, Squad: forcedPlayer.Squad,
-                            Role: forcedPlayer.Role, Mate: forcedPlayer.Mate, Regularness: forcedPlayer.Regularness,
+                            Role: forcedPlayer.Role, Integrity: forcedPlayer.Integrity, Mate: forcedPlayer.Mate, Regularness: forcedPlayer.Regularness,
                             // League goal bonus: effective value + market price; the bid price stays the acquisition cost.
                             ExpectedPerformance: ScoringEngine.EffectiveExpectedPerformance(forcedPlayer.ExpectedPerformance, forcedPlayer.Role, team.League),
                             BaseExpectedPerformance: forcedPlayer.ExpectedPerformance, ExpectedStd: forcedMarket.Std,
@@ -368,6 +368,7 @@ namespace Fantahelp.API.Services
                         Name: tp.Player.Name,
                         Squad: tp.Player.Squad,
                         Role: tp.Player.Role,
+                        Integrity: tp.Player.Integrity,
                         Mate: tp.Player.Mate,
                         Regularness: tp.Player.Regularness,
                         // League goal bonus: effective value and market value are adjusted;
@@ -388,7 +389,7 @@ namespace Fantahelp.API.Services
                 var marketPrice = ScoringEngine.EffectiveMarketPrice(market.Price, fp.Role, league);
                 currentPlayers.Add(new ScoringPlayer(
                     Id: fp.Id, Name: fp.Name, Squad: fp.Squad, Role: fp.Role,
-                    Mate: fp.Mate, Regularness: fp.Regularness,
+                    Integrity: fp.Integrity, Mate: fp.Mate, Regularness: fp.Regularness,
                     ExpectedPerformance: ScoringEngine.EffectiveExpectedPerformance(fp.ExpectedPerformance, fp.Role, league),
                     BaseExpectedPerformance: fp.ExpectedPerformance, ExpectedStd: market.Std,
                     MarketValue: marketPrice, AcquisitionCost: marketPrice
@@ -406,7 +407,7 @@ namespace Fantahelp.API.Services
                 var marketPrice = ScoringEngine.EffectiveMarketPrice(market.Price, p.Role, league);
                 return new ScoringPlayer(
                     Id: p.Id, Name: p.Name, Squad: p.Squad, Role: p.Role,
-                    Mate: p.Mate, Regularness: p.Regularness,
+                    Integrity: p.Integrity, Mate: p.Mate, Regularness: p.Regularness,
                     ExpectedPerformance: ScoringEngine.EffectiveExpectedPerformance(p.ExpectedPerformance, p.Role, league),
                     BaseExpectedPerformance: p.ExpectedPerformance, ExpectedStd: market.Std,
                     MarketValue: marketPrice, AcquisitionCost: marketPrice

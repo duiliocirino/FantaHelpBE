@@ -14,6 +14,11 @@ public record ScoringPlayer(
     string Name,
     string Squad,
     string Role,
+    /// <summary>
+    /// Consensus robustness 1-5 (higher = more robust); null = unknown.
+    /// Used by the scoring engine's integrity tilt (see ScoringEngine.ReliableValue).
+    /// </summary>
+    int? Integrity,
     string? Mate,
     int Regularness,
     /// <summary>

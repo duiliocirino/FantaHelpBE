@@ -88,6 +88,26 @@ Anchors are percentage-native (starters 80% = reliable starter, subs 60% = relia
 - Price-uplift factors (D +10% / C +5%) and value factors (D +2% / C +3%) are engine constants in `ScoringEngine` — expose as per-league settings if real-world calibration suggests.
 - DP role-local approximation: the engine scores role-local units during search, so cross-role aggregates (global regularness average, cross-role mates) are approximated in pruning; final teams can be ~0.1% below the true optimum of the stated formula. Accepted.
 
+### Scoring Engine — Reliability-Aware Player Value (V)
+
+**Context (data findings, 26-27 import):**
+- `expmf` is the quality **when playing** — flat across regularness buckets (D: 5.93 at reg 0 → 6.16 at reg 80+; user-confirmed no start-probability content). The old engine scored raw expmf, so a reg-25 defender (Fortini, 5.07 pts/cr) beat a reg-95 one (1.04 pts/cr) — "phantom bargains": the market prices availability (D mean price 1.6cr reg-0 → 19.0cr reg-80+), the engine didn't.
+- `expstd` is the **std of observed auction prices** (ML `pipeline/price_models.py`, clipped [1,150]) — price uncertainty, not on-pitch reliability; correlation with integrity 0.005. Not usable in the objective.
+- `integrity` (1–5, 18 nulls) is independent: corr(expmf) −0.162 (slightly anti-correlated — robust players are less explosive, a real risk/return axis), corr(reg) −0.019.
+- The old bench ratio B is structurally pinned (3.58–3.65 across all teams; per-role 0.84–0.97) — it measures the pool's talent curve, not team quality, and moves the wrong way under budget pressure (tight D cap → B up while S crashes). Meanwhile S + Σexpmf(bench) ≈ 162.5–163.2 (±0.35): total squad value is allocation-invariant, so absolute bench value is the right scale.
+
+**Done (2026-08-24):**
+- Every player is scored by the reliable value `V = expmf' × (regularness/100)^α × (1 + 0.03·α·(integrity−3))` (integrity null → factor 1), with α = `ReliabilityWeight`/10 and expmf' the goal-bonus-adjusted performance. S = ΣV(starters) + back-4 (threshold still on the **base** expmf, unchanged); B = **0.5 × ΣV(bench)** (rotation factor: a bench player plays about half the fixtures — `ScoringEngine.BenchRotationFactor`); T = mates + graduated squad penalty + credit spread (the old regularness term removed — it double-counts what V now prices). Price side unchanged.
+- `ReliabilityWeight` default 5 → **10** (full expected contribution — the economically consistent reading); 0 = pure quality-when-playing. `ScoringPlayer` gained `Integrity` (4 construction sites).
+- **Why the 0.5 rotation factor**: with B = ΣV (no discount) line and bench points are worth the same and the line/bench split is endogenous (top-k by V), so the S/B weight ratio is mathematically degenerate — verified: 6/3, 6/5, 5/7, 5/5 all return the same team. With ρ < 1 the ratio becomes a (weak) real trade-off: effective value per point is `StarterWeight/10` (line) vs `BenchWeight×0.5/10` (bench). Verified behavior: the ratio flips only marginal picks and **saturates** once `BenchWeight×0.5 ≥ StarterWeight` (2/7 ≡ 4/5 ≡ 9/9); the team is dominated by V, the T knobs and the budget allocation. Accepted — a point is a point, and the allocation caps are the real line-vs-bench budget lever.
+- Presets re-tuned to the knobs that actually move the team; all 8 verified distinct on 26-27 data: Balanced (default 6/3/1 div2 mate1 rel10), Max Points (7/2/1 div1 rel0), Star Line (8/2/2), Deep Bench (4/8/2), Diversified (6/3/3 div10), Mate Collector (6/3/3 mate10 — buys ~11 mate pairs, S 71.5→64.8), Tempered (rel5), Mate & Variety (6/3/3 div5 mate5). See `FantaHelpFE/docs/backend-changes-needed.md` #12.
+- Verified component-exact (S/B/T recomputed from the response, diff ≤ 1e-13): w=0, default, flag on/off; back-4 exact (3-4-3 → +0.0000, 4-3-3 → +3.0000); 1-3-2-2 and the auction path work.
+
+**Open:**
+- `BenchRotationFactor` (0.5) is a single engine constant — calibrate against real rotation data or expose as a league setting if the team's injury/rotation patterns suggest.
+- Integrity tilt strength (0.03 per level at rel 10: int-5 +6% / int-1 −6%) is a constant — revisit if the 1–5 scale changes.
+- Note the `expstd` semantics (auction-price std) in `docs/ml-be-contract.md` so nobody reaches for it as a reliability signal again.
+
 ### Precompute optimal teams per team state
 
 **Context:** During live auctions the FE repeatedly calls `POST /api/teams/getOptimal`; the first call for a state pays the full DP cost (~0.8-1.5s). Goal: always keep the optimal team precomputed for each team's current state and re-trigger on state changes (e.g. a player is added/removed from the team).
@@ -208,6 +228,7 @@ Reference: `docs/performance-improvements.md`
 | Date | Item | Status |
 |------|------|--------|
 | 2026-08-24 | Scoring engine rework: `StrategyWeights` (defaults = legacy), graduated same-club penalty, goal-bonus rework (value + price uplift, per-league toggle `PUT /api/leagues/{id}/goal-bonus`), format-aware + adjusted league market endpoint (`?starters=N`, `baseExpectedPrice`) | DONE |
+| 2026-08-24 | Reliability-aware player value: `V = expmf' × (reg/100)^(Rel/10) × integrity tilt` (Rel default 10), S = ΣV + back-4, B = 0.5·ΣV (rotation factor), T loses the regularness term; 8 presets re-tuned (all distinct) | DONE |
 | 2026-08-23 | Precompute optimal teams per team state (`TeamPrecomputer`, base-state fast path) | DONE |
 | 2026-08-23 | 26-27 per-format contract: `Player.Integrity`, `PlayerPrice` table, multi-file import, format-aware suggestion pricing | DONE |
 | 2026-08-10 | Suggestion engine caching Phase 1 + uniform scoring | DONE (`2f97eba`) |
