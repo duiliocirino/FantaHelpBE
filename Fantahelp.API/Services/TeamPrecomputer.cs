@@ -66,6 +66,7 @@ namespace Fantahelp.API.Services
                 LineUp = request.LineUp,
                 CreditsDistribution = request.CreditsDistribution,
                 BudgetAllocation = request.BudgetAllocation,
+                Weights = request.Weights,
                 AuctionedPlayer = null,
             };
         }

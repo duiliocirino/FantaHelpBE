@@ -16,7 +16,17 @@ public record ScoringPlayer(
     string Role,
     string? Mate,
     int Regularness,
+    /// <summary>
+    /// League-adjusted expected performance (goal-bonus value uplift baked in when the
+    /// league flag is on). Used for the starter sum, bench ratios and rankings.
+    /// </summary>
     double ExpectedPerformance,
+    /// <summary>
+    /// Raw ML expected performance, before the goal-bonus adjustment. Used where the
+    /// league rule itself references the base score — the back-4 defense bonus threshold
+    /// is evaluated on the average WITHOUT the goal bonus.
+    /// </summary>
+    double BaseExpectedPerformance,
     double ExpectedStd,
     int MarketValue,
     int AcquisitionCost

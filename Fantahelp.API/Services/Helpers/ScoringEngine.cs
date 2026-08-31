@@ -2,12 +2,33 @@ namespace Fantahelp.API.Services
 {
     /// <summary>
     /// Stateless scoring engine for the suggestion pipeline.
-    /// Computes composite team scores from starters, bench, and strategy bonuses.
+    ///
+    /// Total = (StarterWeight·S + BenchWeight·B + StrategyWeight·T) / 10
+    ///
+    /// S (starters): match-day performance — sum of the effective expected performance of
+    ///   the starters, plus the back-4 defense bonus for 4+DEF lineups (threshold on the
+    ///   base performance, without the goal-bonus adjustment).
+    /// B (bench): rotation depth — sum of the per-role bench/starter performance ratios
+    ///   (structurally 0-4).
+    /// T (strategy): reliability + personal preferences — regularness against baseline,
+    ///   mates, graduated same-club penalty, credit spread.
+    ///
+    /// Weights come from SuggestionRequest.Weights (optional; defaults 6/3/1 reproduce the
+    /// legacy 0.6/0.3/0.1 block calibration).
+    ///
+    /// League goal bonus (League.GoalBonusPerRole) is NOT a score term: it is a market
+    /// adjustment applied up-front via EffectiveExpectedPerformance / EffectiveMarketPrice /
+    /// EffectivePriceStd, which the suggestion pipeline bakes into every ScoringPlayer.
+    /// That way both the value side (ranking) and the price side (budget decisions) reflect
+    /// the league rule.
     /// </summary>
     public static class ScoringEngine
     {
         private static readonly List<string> Roles = ["P", "D", "C", "A"];
 
+        // --- Goal-bonus league rule ---
+        // Bonus points awarded per goal by role. 3 (attackers) is the base and is already
+        // included in expmf, so only the excess over 3 has any effect.
         private static readonly Dictionary<string, int> GoalBonusPerRole = new()
         {
             { "P", 6 },
@@ -15,6 +36,8 @@ namespace Fantahelp.API.Services
             { "C", 4 },
             { "A", 3 }
         };
+        // Share of a player's expected points that come from goals, by role.
+        // Used to estimate expected goals: goals ≈ goalPerc × expmf / 10 (a goal is 10 pts).
         private static readonly Dictionary<string, double> GoalPercPerRole = new()
         {
             { "P", 0.0 },
@@ -22,13 +45,21 @@ namespace Fantahelp.API.Services
             { "C", 0.3 },
             { "A", 0.6 }
         };
-
-        private const double StartMultiplier = 0.6;
-        private const double SubsMultiplier = 0.3;
-        private const double StrategyMultiplier = 0.1;
-
-        public static Score CalculateScore(List<ScoringPlayer> players, SuggestionRequest suggestionRequest, League league)
+        // Expected market price uplift by role in a goal-bonus league: the market pays more
+        // for bonus-eligible positions (empirical: D +10%, C +5%). Applied to players being
+        // bought; owned players keep their paid auction price.
+        private static readonly Dictionary<string, double> PriceUpPerRole = new()
         {
+            { "P", 0.0 },
+            { "D", 0.10 },
+            { "C", 0.05 },
+            { "A", 0.0 }
+        };
+
+        public static Score CalculateScore(List<ScoringPlayer> players, SuggestionRequest suggestionRequest)
+        {
+            var weights = suggestionRequest.Weights ?? new StrategyWeights();
+
             var playersByRole = players
                 .GroupBy(p => p.Role)
                 .ToDictionary(g => g.Key, g => g.OrderByDescending(p => p.ExpectedPerformance).ToList());
@@ -64,14 +95,16 @@ namespace Fantahelp.API.Services
 
             double startingScore = ComputeStarterContribution(starters, suggestionRequest.LineUp);
             double subsScore = ComputeSubContribution(subs, starters);
-            double strategyScore = ComputeStrategiesScore(starters, subs, league, suggestionRequest);
+            double strategyScore = ComputeStrategiesScore(starters, subs, suggestionRequest, weights);
 
             return new Score
             {
                 StarterScore = startingScore,
                 BenchScore = subsScore,
                 PenaltyScore = strategyScore,
-                TotalScore = StartMultiplier * startingScore + SubsMultiplier * subsScore + StrategyMultiplier * strategyScore
+                TotalScore = (weights.StarterWeight * startingScore
+                            + weights.BenchWeight * subsScore
+                            + weights.StrategyWeight * strategyScore) / 10.0
             };
         }
 
@@ -79,11 +112,17 @@ namespace Fantahelp.API.Services
         {
             int bonusDefense = 0;
 
+            // Back-4 defense bonus: only for 4+DEF lineups (e.g. a 3-4-3 never earns it).
+            // League rule: when the keeper + top 3 defenders average 6+ in a fixture, the
+            // team gets k extra points, k = 1 for 6-6.25, 2 for 6.25-6.5, 3 for 6.5-6.75, ...
+            // The threshold is evaluated on the BASE expected performance (without the
+            // goal-bonus adjustment) — the bonus is a defensive-stability rule, independent
+            // of the per-player goal value handled by EffectiveExpectedPerformance.
             if (lineUp.Defenders >= 4)
             {
-                var gk = players.Where(p => p.Role == "P").OrderByDescending(p => p.ExpectedPerformance).FirstOrDefault();
+                var gk = players.Where(p => p.Role == "P").OrderByDescending(p => p.BaseExpectedPerformance).FirstOrDefault();
                 var topDefenders = players.Where(p => p.Role == "D")
-                                    .OrderByDescending(p => p.ExpectedPerformance)
+                                    .OrderByDescending(p => p.BaseExpectedPerformance)
                                     .Take(3)
                                     .ToList();
                 var selected = new List<ScoringPlayer>();
@@ -93,7 +132,7 @@ namespace Fantahelp.API.Services
 
                 if (selected.Count == 4)
                 {
-                    double avgScore = selected.Average(p => p.ExpectedPerformance);
+                    double avgScore = selected.Average(p => p.BaseExpectedPerformance);
                     if (avgScore >= 6)
                     {
                         // Bonus: 1 for each 0.25 above 6 (floor to nearest category)
@@ -127,12 +166,10 @@ namespace Fantahelp.API.Services
         }
 
         private static double ComputeStrategiesScore(List<ScoringPlayer> starters, List<ScoringPlayer> subs,
-            League league, SuggestionRequest suggestionRequest)
+            SuggestionRequest suggestionRequest, StrategyWeights weights)
         {
             double startersSpreadCreditsScore = 0;
-            double goalBonusPerRole = 0;
-            double regularnessStartersScore = 0;
-            double regularnessSubsScore = 0;
+            double regularnessScore = 0;
             double mateScore = 0;
             double sameTeamScore = 0;
 
@@ -142,6 +179,7 @@ namespace Fantahelp.API.Services
             This is done in order to make the variance of the expected performance be lower.
             The impact of this score will try to spread the credits over more players instead
             of centralising the credits on fewer instances, based on the intensity wanted.
+            Costs are the league-adjusted acquisition costs (goal-bonus price uplift included).
             */
             {
                 if (suggestionRequest.CreditsDistribution != 0 && allPlayers.Count > 0)
@@ -159,77 +197,84 @@ namespace Fantahelp.API.Services
                     }
                 }
             }
-
-            //                       --- Goal Bonuses Per Role ---
-            {
-                if (league.GoalBonusPerRole)
-                    foreach (var role in Roles)
-                    {
-                        if (role != "P" && role != "A" && starters.Count > 0)
-                        {
-                            var startersForRole = starters.Where(p => p.Role == role).ToList();
-                            if (startersForRole.Count > 0)
-                                goalBonusPerRole += (GoalBonusPerRole[role] - 3) * GoalPercPerRole[role] * starters
-                                    .Where(p => p.Role == role)
-                                    .Average(p => p.ExpectedPerformance - 5);
-                        }
-                    }
-            }
             /*                          --- Regularness ---
             Percentage-native (26-27+ contract): regularness is the expected starting %
-            (0-100, multiples of 5), not a 1-5 rating. Each group is scored against its
-            own baseline: starters 80% (reliable starter), subs 60% (reliable sub).
-            Slopes: 1 point per 4% of deviation for starters, 1 point per 20% for subs.
-            (These preserve the magnitude of the legacy 1-5 formulas 5*(avg-4) / (avg-3)
-            under the 1<->20% ... 5<->100% mapping, so the relative tuning of the other
-            strategy terms is unchanged; the slopes are one-line knobs if re-tuning.)
+            (0-100, multiples of 5). Each group is scored against its own baseline:
+            starters 80% (reliable starter), subs 60% (reliable sub). Slopes: 1 point per
+            4% of deviation for starters, 1 point per 20% for subs. The whole block is
+            scaled by ReliabilityWeight/5 (5 = neutral = legacy behavior).
             */
             {
                 if (starters.Count > 0)
                 {
                     var regularnessStarters = starters.Average(p => p.Regularness);
-                    regularnessStartersScore = (regularnessStarters - 80) / 4;
+                    regularnessScore += (regularnessStarters - 80) / 4;
                 }
 
                 if (subs.Count > 0)
                 {
                     var regularnessSubs = subs.Average(p => p.Regularness);
-                    regularnessSubsScore = (regularnessSubs - 60) / 20;
+                    regularnessScore += (regularnessSubs - 60) / 20;
                 }
+
+                regularnessScore *= weights.ReliabilityWeight / 5.0;
             }
             //                            --- Team Bonuses ---
             {
-                // MATES
+                // MATES: points per starter whose mate sits on the bench (MateWeight).
                 var subsNames = new HashSet<string>(subs.Select(p => p.Name));
-                mateScore = starters.Count > 0
+                mateScore = weights.MateWeight * (starters.Count > 0
                     ? starters.Count(s => !string.IsNullOrEmpty(s.Mate) && subsNames.Contains(s.Mate))
-                    : 0;
+                    : 0);
 
-                // SAME SQUAD PLAYERS
-
-                // More than 5 players of the same team
-                sameTeamScore = allPlayers
-                    .Where(p => p.Role != "P")
+                // SAME SQUAD PLAYERS — graduated penalty (no dead zone):
+                //   each same-club player beyond the 1st in a role costs d,
+                //   each player beyond the 3rd club-wide (non-GK) costs 2d,
+                //   with d = SquadDiversity/5 (default 2 -> d = 0.4).
+                var nonP = allPlayers.Where(p => p.Role != "P").ToList();
+                double sameClubInRole = nonP
+                    .GroupBy(p => (p.Role, p.Squad))
+                    .Sum(g => Math.Max(0, g.Count() - 1));
+                double sameClubTeamWide = nonP
                     .GroupBy(p => p.Squad)
-                    .Sum(g => g.Count() >= 4 ? -1 * (g.Count() - 3) : 0);
-
-                // More than 2 players of the same team in the same Role
-                foreach (var role in Roles.Where(r => r != "P"))
-                {
-                    if (allPlayers.Where(p => p.Role == role)
-                        .GroupBy(p => p.Squad)
-                        .Any(g => g.Count() >= 2))
-                    {
-                        sameTeamScore -= 0.5;
-                    }
-                }
+                    .Sum(g => Math.Max(0, g.Count() - 3));
+                sameTeamScore = -weights.SquadDiversity / 5.0 * (sameClubInRole + 2 * sameClubTeamWide);
             }
-            // Final Sum
-            double strategyScore = regularnessStartersScore + regularnessSubsScore
-                + mateScore + sameTeamScore + goalBonusPerRole
+            // Final Sum (the goal bonus is no longer a score term: it is applied to the
+            // effective value/price of each player before scoring).
+            double strategyScore = regularnessScore + mateScore + sameTeamScore
                 + suggestionRequest.CreditsDistribution * startersSpreadCreditsScore;
 
             return strategyScore;
         }
+
+        /// <summary>
+        /// Effective expected performance under the league's goal-bonus rule: expmf plus the
+        /// expected net bonus points — goalPerc × expmf / 10 (expected goals) times the
+        /// excess of the role bonus over the base 3 (already in expmf). Net factors:
+        /// D +2%, C +3%, A/P unchanged.
+        /// </summary>
+        public static double EffectiveExpectedPerformance(double expmf, string role, League league)
+            => league.GoalBonusPerRole
+                ? expmf * (1 + GoalPercPerRole[role] * (GoalBonusPerRole[role] - 3) / 10.0)
+                : expmf;
+
+        /// <summary>
+        /// Effective market price in a goal-bonus league (position uplift: D +10%, C +5%).
+        /// Applies to players being bought; owned players keep their paid auction price.
+        /// </summary>
+        public static int EffectiveMarketPrice(int price, string role, League league)
+            => league.GoalBonusPerRole
+                ? (int)Math.Round(price * (1 + PriceUpPerRole[role]))
+                : price;
+
+        /// <summary>
+        /// Effective price standard deviation, scaled with the price so team-level
+        /// aggregations (sum of squares) stay consistent with the adjusted prices.
+        /// </summary>
+        public static double EffectivePriceStd(double std, string role, League league)
+            => league.GoalBonusPerRole
+                ? std * (1 + PriceUpPerRole[role])
+                : std;
     }
 }

@@ -12,6 +12,12 @@ public class SuggestionRequest
     public BudgetAllocation? BudgetAllocation { get; set; }
 
     /// <summary>
+    /// Optional personal-preference weights for the scoring engine (0-10 knobs).
+    /// Absent/null = defaults, which reproduce the legacy 0.6/0.3/0.1 block calibration.
+    /// </summary>
+    public StrategyWeights? Weights { get; set; }
+
+    /// <summary>
     /// Optional player to simulate adding to the team for a "potential score"
     /// comparison. When provided, the suggestion engine should compute a second
     /// score that includes this player at the given acquisition price.

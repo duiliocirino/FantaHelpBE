@@ -16,4 +16,9 @@ public class PlayerReadDto
     public double ExpectedPerformance { get; set; }
     public double ExpectedStd { get; set; }
     public int ExpectedPrice { get; set; }
+    /// <summary>
+    /// Raw ML expected price before the league's goal-bonus uplift. Populated by the
+    /// league-scoped endpoint only (null on the global endpoints).
+    /// </summary>
+    public int? BaseExpectedPrice { get; set; }
 }

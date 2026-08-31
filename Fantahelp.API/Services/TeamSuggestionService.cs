@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using Fantahelp.API.Services.Helpers;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
@@ -78,8 +79,8 @@ namespace Fantahelp.API.Services
             // Player.ExpectedPrice/ExpectedStd columns.
             var lineup = suggestionRequest.LineUp;
             var totalStarters = lineup.Keepers + lineup.Defenders + lineup.Midfielders + lineup.Attackers;
-            var priceFormat = await ResolvePriceFormatAsync(totalStarters, team.League.InitialBudget);
-            var priceLookup = await LoadPriceLookupAsync(priceFormat);
+            var priceFormat = await PriceFormatResolver.ResolveAsync(_context, totalStarters, team.League.InitialBudget);
+            var priceLookup = await PriceFormatResolver.LoadLookupAsync(_context, priceFormat);
             _logger.LogDebug("Price format resolved: {Format} (requested {Starters} starters, {Credits} credits).",
                 priceFormat?.ToString() ?? "legacy (Player columns)", totalStarters, team.League.InitialBudget);
 
@@ -87,7 +88,7 @@ namespace Fantahelp.API.Services
             if (!availablePlayersResult.Success && availablePlayersResult.ErrorMessage != null)
                 return ServiceResult<List<SuggestionResult>>.FailureResult(availablePlayersResult.ErrorMessage);
 
-            var currentPlayers = BuildCurrentPlayers(team, suggestionRequest.FavoritePlayerIds, playerLookup, priceLookup);
+            var currentPlayers = BuildCurrentPlayers(team, suggestionRequest.FavoritePlayerIds, playerLookup, priceLookup, team.League);
             var availablePlayers = (availablePlayersResult.Data ?? []).ToList();
 
             // --- 1. BASE SUGGESTION TASK ---
@@ -115,8 +116,10 @@ namespace Fantahelp.API.Services
                         var forcedScoringPlayer = new ScoringPlayer(
                             Id: forcedPlayer.Id, Name: forcedPlayer.Name, Squad: forcedPlayer.Squad,
                             Role: forcedPlayer.Role, Mate: forcedPlayer.Mate, Regularness: forcedPlayer.Regularness,
-                            ExpectedPerformance: forcedPlayer.ExpectedPerformance, ExpectedStd: forcedMarket.Std,
-                            MarketValue: forcedMarket.Price,
+                            // League goal bonus: effective value + market price; the bid price stays the acquisition cost.
+                            ExpectedPerformance: ScoringEngine.EffectiveExpectedPerformance(forcedPlayer.ExpectedPerformance, forcedPlayer.Role, team.League),
+                            BaseExpectedPerformance: forcedPlayer.ExpectedPerformance, ExpectedStd: forcedMarket.Std,
+                            MarketValue: ScoringEngine.EffectiveMarketPrice(forcedMarket.Price, forcedPlayer.Role, team.League),
                             AcquisitionCost: suggestionRequest.AuctionedPlayer.AcquisitionPrice
                         );
 
@@ -208,7 +211,9 @@ namespace Fantahelp.API.Services
                 request.CreditsDistribution,
                 request.NumTeams,
                 favorites,
-                allocation);
+                allocation,
+                (request.Weights ?? new StrategyWeights()).Signature,
+                team.League.GoalBonusPerRole);
 
             return $"optimal:{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload))[..16]).ToLowerInvariant()}";
         }
@@ -229,7 +234,7 @@ namespace Fantahelp.API.Services
         {
             var budgetSpentPerRole = ComputeBudgetSpentPerRole(team, forcedPlayer);
             var playersToBuy = ComputePlayersToBuy(currentPlayers);
-            var availablePlayersByRole = BuildAvailableByRole(availablePlayers, priceLookup);
+            var availablePlayersByRole = BuildAvailableByRole(availablePlayers, priceLookup, team.League);
 
             var baseCapsPerRole = ComputeMaxBudgetsPerRole(team.League.InitialBudget, budgetSpentPerRole, suggestionRequest);
 
@@ -336,9 +341,10 @@ namespace Fantahelp.API.Services
 
             var results = BacktrackToGetTeams(
                 finalCombination: finalCombination,
-                numTeams: numTeams,
                 playerLookup: playerLookup,
-                priceLookup: priceLookup
+                numTeams: numTeams,
+                priceLookup: priceLookup,
+                league: league
             );
 
             if (results.Count > 0)
@@ -351,7 +357,7 @@ namespace Fantahelp.API.Services
             };
         }
 
-        private static List<ScoringPlayer> BuildCurrentPlayers(Team team, List<int> favoritePlayerIds, Dictionary<int, Player> playerLookup, Dictionary<int, (int Price, double Std)>? priceLookup)
+        private static List<ScoringPlayer> BuildCurrentPlayers(Team team, List<int> favoritePlayerIds, Dictionary<int, Player> playerLookup, Dictionary<int, (int Price, double Std)>? priceLookup, League league)
         {
             var currentPlayers = team.Players
                 .Select(tp =>
@@ -364,9 +370,12 @@ namespace Fantahelp.API.Services
                         Role: tp.Player.Role,
                         Mate: tp.Player.Mate,
                         Regularness: tp.Player.Regularness,
-                        ExpectedPerformance: tp.Player.ExpectedPerformance,
+                        // League goal bonus: effective value and market value are adjusted;
+                        // the paid auction price is the acquisition cost (never scaled).
+                        ExpectedPerformance: ScoringEngine.EffectiveExpectedPerformance(tp.Player.ExpectedPerformance, tp.Player.Role, league),
+                        BaseExpectedPerformance: tp.Player.ExpectedPerformance,
                         ExpectedStd: 0,
-                        MarketValue: market.Price,
+                        MarketValue: ScoringEngine.EffectiveMarketPrice(market.Price, tp.Player.Role, league),
                         AcquisitionCost: tp.AuctionPrice
                     );
                 })
@@ -376,27 +385,31 @@ namespace Fantahelp.API.Services
             {
                 var fp = playerLookup[playerId];
                 var market = ResolveMarketPrice(priceLookup, fp);
+                var marketPrice = ScoringEngine.EffectiveMarketPrice(market.Price, fp.Role, league);
                 currentPlayers.Add(new ScoringPlayer(
                     Id: fp.Id, Name: fp.Name, Squad: fp.Squad, Role: fp.Role,
                     Mate: fp.Mate, Regularness: fp.Regularness,
-                    ExpectedPerformance: fp.ExpectedPerformance, ExpectedStd: market.Std,
-                    MarketValue: market.Price, AcquisitionCost: market.Price
+                    ExpectedPerformance: ScoringEngine.EffectiveExpectedPerformance(fp.ExpectedPerformance, fp.Role, league),
+                    BaseExpectedPerformance: fp.ExpectedPerformance, ExpectedStd: market.Std,
+                    MarketValue: marketPrice, AcquisitionCost: marketPrice
                 ));
             }
 
             return currentPlayers;
         }
 
-        private static Dictionary<string, List<ScoringPlayer>> BuildAvailableByRole(List<Player> availablePlayers, Dictionary<int, (int Price, double Std)>? priceLookup)
+        private static Dictionary<string, List<ScoringPlayer>> BuildAvailableByRole(List<Player> availablePlayers, Dictionary<int, (int Price, double Std)>? priceLookup, League league)
         {
             var scoringPlayers = availablePlayers.Select(p =>
             {
                 var market = ResolveMarketPrice(priceLookup, p);
+                var marketPrice = ScoringEngine.EffectiveMarketPrice(market.Price, p.Role, league);
                 return new ScoringPlayer(
                     Id: p.Id, Name: p.Name, Squad: p.Squad, Role: p.Role,
                     Mate: p.Mate, Regularness: p.Regularness,
-                    ExpectedPerformance: p.ExpectedPerformance, ExpectedStd: market.Std,
-                    MarketValue: market.Price, AcquisitionCost: market.Price
+                    ExpectedPerformance: ScoringEngine.EffectiveExpectedPerformance(p.ExpectedPerformance, p.Role, league),
+                    BaseExpectedPerformance: p.ExpectedPerformance, ExpectedStd: market.Std,
+                    MarketValue: marketPrice, AcquisitionCost: marketPrice
                 );
             }).ToList();
 
@@ -483,7 +496,9 @@ namespace Fantahelp.API.Services
                 lineup: suggestionRequest.LineUp,
                 creditsDistribution: suggestionRequest.CreditsDistribution,
                 budgetAllocation: suggestionRequest.BudgetAllocation,
-                priceFormat: priceFormat
+                priceFormat: priceFormat,
+                weights: suggestionRequest.Weights,
+                goalBonus: league.GoalBonusPerRole
             );
 
             if (_cache.TryGetValue(cacheKey, out RoleValueTable? cached))
@@ -533,7 +548,7 @@ namespace Fantahelp.API.Services
                         if (applyForcedPlayer)
                             evalPlayers.Add(forcedPlayer!);
 
-                        var score = ScoringEngine.CalculateScore(evalPlayers, suggestionRequest, league);
+                        var score = ScoringEngine.CalculateScore(evalPlayers, suggestionRequest);
 
                         var currentSelection = roleValueTable.GetPlayerSelection(k, b);
                         if (currentSelection == null || score.TotalScore > currentSelection.Score.TotalScore)
@@ -636,7 +651,7 @@ namespace Fantahelp.API.Services
                             .Select(id => scoreableLookup[id])
                             .ToList();
 
-                        Score newScore = ScoringEngine.CalculateScore(selectedPlayers, suggestionRequest, league);
+                        Score newScore = ScoringEngine.CalculateScore(selectedPlayers, suggestionRequest);
                         Score lastScore = finalTable.GetPlayerSelection(t, newBudget)?.Score ?? new Score { TotalScore = double.MinValue };
 
                         if (newScore.TotalScore > lastScore.TotalScore)
@@ -652,7 +667,7 @@ namespace Fantahelp.API.Services
             return finalTable;
         }
 
-        private List<SuggestionResult> BacktrackToGetTeams(FinalCombinationResult finalCombination, Dictionary<int, Player> playerLookup, int numTeams, Dictionary<int, (int Price, double Std)>? priceLookup)
+        private List<SuggestionResult> BacktrackToGetTeams(FinalCombinationResult finalCombination, Dictionary<int, Player> playerLookup, int numTeams, Dictionary<int, (int Price, double Std)>? priceLookup, League league)
         {
             List<SuggestionResult> suggestionResults = [];
 
@@ -675,23 +690,24 @@ namespace Fantahelp.API.Services
                     .ToList();
 
                 // Team-level price std from the same format the engine priced with
-                // (legacy Player columns as fallback).
+                // (legacy Player columns as fallback), adjusted for the league goal bonus.
                 var teamPlayersStd = (int)Math.Sqrt(teamPlayers.Sum(p =>
                 {
                     var std = priceLookup != null && priceLookup.TryGetValue(p.Id, out var pp) ? pp.Std : p.ExpectedStd;
-                    return Math.Pow(std, 2);
+                    return Math.Pow(ScoringEngine.EffectivePriceStd(std, p.Role, league), 2);
                 }));
 
                 // Keep the displayed per-player prices consistent with the format used for scoring
-                // (the legacy Player columns carry the reference format only).
+                // (the legacy Player columns carry the reference format only) and with the
+                // league goal-bonus price uplift applied during scoring.
                 var playerDtos = PlayerMapper.ToReadDtos(teamPlayers);
                 foreach (var dto in playerDtos)
                 {
-                    if (priceLookup != null && priceLookup.TryGetValue(dto.Id, out var pp))
-                    {
-                        dto.ExpectedPrice = pp.Price;
-                        dto.ExpectedStd = pp.Std;
-                    }
+                    var (rawPrice, rawStd) = priceLookup != null && priceLookup.TryGetValue(dto.Id, out var pp)
+                        ? (pp.Price, pp.Std)
+                        : (dto.ExpectedPrice, dto.ExpectedStd);
+                    dto.ExpectedPrice = ScoringEngine.EffectiveMarketPrice(rawPrice, dto.Role, league);
+                    dto.ExpectedStd = ScoringEngine.EffectivePriceStd(rawStd, dto.Role, league);
                 }
 
                 suggestionResults.Add(new SuggestionResult
@@ -709,7 +725,9 @@ namespace Fantahelp.API.Services
         /// <summary>
         /// Builds a deterministic cache key for a DP table entry.
         /// Includes all factors that affect DP scoring: role, player pool, slots, budget,
-        /// forced player context, current role-mates, lineup configuration, credits distribution and budget allocation.
+        /// forced player context, current role-mates, lineup configuration, credits distribution,
+        /// budget allocation, price format, personal-preference weights and the league
+        /// goal-bonus rule (it changes both values and prices).
         /// </summary>
         private static string BuildDpCacheKey(
             string role,
@@ -721,7 +739,9 @@ namespace Fantahelp.API.Services
             LineUp lineup,
             int creditsDistribution,
             BudgetAllocation? budgetAllocation,
-            (int Credits, int Starters)? priceFormat)
+            (int Credits, int Starters)? priceFormat,
+            StrategyWeights? weights,
+            bool goalBonus)
         {
             // Deterministic hash from sorted player IDs
             var hash = rolePlayerIds.OrderBy(id => id).Aggregate(0L, (h, id) => h ^ (id.GetHashCode() * 31L));
@@ -735,45 +755,9 @@ namespace Fantahelp.API.Services
             // must be part of the key (two leagues can share lineup + per-role budgets
             // while using different price formats).
             var formatKey = priceFormat == null ? "legacy" : $"{priceFormat.Value.Credits}_{priceFormat.Value.Starters}";
-            return $"dp:{role}:{hash}:{slots}:{maxBudget}:{forcedKey}:{matesHash}:{lineupKey}:{creditsDistribution}:{allocKey}:{formatKey}";
-        }
-
-        /// <summary>
-        /// Resolves the player price format for a request: the exact (credits, starters)
-        /// combination when ML data exists for it, otherwise the closest available format
-        /// (by credits distance, then starters distance). Returns null when no per-format
-        /// price data exists at all (e.g. a legacy single-format import); callers then fall
-        /// back to Player.ExpectedPrice/ExpectedStd.
-        /// </summary>
-        private async Task<(int Credits, int Starters)?> ResolvePriceFormatAsync(int starters, int credits)
-        {
-            var rows = await _context.PlayerPrices
-                .Select(pp => new { pp.Credits, pp.Starters })
-                .Distinct()
-                .ToListAsync();
-            var formats = rows.GroupBy(r => (r.Credits, r.Starters)).Select(g => g.Key).ToList();
-            if (formats.Count == 0)
-                return null;
-            return formats
-                .OrderBy(f => Math.Abs(f.Credits - credits))
-                .ThenBy(f => Math.Abs(f.Starters - starters))
-                .ThenBy(f => f.Credits) // deterministic tie-break
-                .First();
-        }
-
-        /// <summary>
-        /// Loads per-player (expected price, std) for the resolved format.
-        /// Returns null when the format is null (no per-format data).
-        /// </summary>
-        private async Task<Dictionary<int, (int Price, double Std)>?> LoadPriceLookupAsync((int Credits, int Starters)? priceFormat)
-        {
-            if (priceFormat == null)
-                return null;
-            var rows = await _context.PlayerPrices
-                .Where(pp => pp.Credits == priceFormat.Value.Credits && pp.Starters == priceFormat.Value.Starters)
-                .Select(pp => new { pp.PlayerId, pp.Price, pp.Std })
-                .ToListAsync();
-            return rows.ToDictionary(r => r.PlayerId, r => (r.Price, r.Std));
+            var weightsKey = (weights ?? new StrategyWeights()).Signature;
+            var bonusKey = goalBonus ? "gb" : "nobb";
+            return $"dp:{role}:{hash}:{slots}:{maxBudget}:{forcedKey}:{matesHash}:{lineupKey}:{creditsDistribution}:{allocKey}:{formatKey}:{weightsKey}:{bonusKey}";
         }
 
         /// <summary>

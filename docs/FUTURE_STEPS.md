@@ -70,6 +70,24 @@ Anchors are percentage-native (starters 80% = reliable starter, subs 60% = relia
 
 ---
 
+### Scoring Engine — Personalization Weights & Goal-Bonus Rework
+
+**Context:** Deep analysis of the objective function (2026-08-24) showed the three blocks were effectively 96/3/1 (starters/bench/strategy) because raw block scales (~15:1:1) weren't compensated by the 0.6/0.3/0.1 multipliers — bench and personal preferences were decision-irrelevant. The same-club penalty had a dead zone (a 3rd same-club defender was free — the "3 Roma defenders" case). The goal-bonus league rule was a small strategy term applying the full bonus (base 3 is already in expmf) with no price impact.
+
+**Done (2026-08-24):**
+- `StrategyWeights` on `SuggestionRequest` (optional): `StarterWeight` 6 / `BenchWeight` 3 / `StrategyWeight` 1 (defaults = legacy) + sub-knobs `SquadDiversity` 2 / `MateWeight` 1 / `ReliabilityWeight` 5 (all 0–10). Absent = legacy behavior, exact reproduction verified.
+- Graduated same-club penalty: per (role, club) `max(0, n−1)`, per club `2·max(0, N−3)`, scaled by `SquadDiversity/5` — no dead zone.
+- Goal-bonus rework (league flag + `PUT /api/leagues/{id}/goal-bonus` toggle), two parts: (1) direct per-player value — net bonus over base 3 injected up-front, DEF ×1.02 / MID ×1.03 on expmf, price side DEF ×1.10 / MID ×1.05 on expected price (roster players keep paid auction price); old strategy term removed. (2) back-4 defense bonus in the starter block — only for 4+DEF lineups, when keeper + top 3 defenders average 6+ **on the base performance (without the goal-bonus adjustment)** the starters get k = ⌊(avg−6)/0.25⌋+1 (6–6.25 → 1, 6.25–6.5 → 2, 6.5–6.75 → 3, …). Verified exact: 3-4-3 adds 0, 4-3-3 adds k.
+- 8 reference presets finalized from the trial matrix (Balanced/Max Points/Deep Bench/Full Depth/Diversified/Reliable/Mate Collector/Safe) — tracked in `FantaHelpFE/docs/backend-changes-needed.md` #12.
+- `GET /api/leagues/{id}/players?starters=N`: format-aware (closes #9 league-scoped part) + goal-bonus adjusted, new `baseExpectedPrice` field (raw estimate).
+- Weights + flag in DP cache key, precompute result key and lastParams.
+- Trial matrix run (SquadDiversity 1–10, block weights, mate weight, flag on/off): all knobs move the team in the intended direction.
+
+**Open:**
+- FE implementation of the presets + goal-bonus toggle + market-tab changes (`FantaHelpFE/docs/backend-changes-needed.md` #12–#14).
+- Price-uplift factors (D +10% / C +5%) and value factors (D +2% / C +3%) are engine constants in `ScoringEngine` — expose as per-league settings if real-world calibration suggests.
+- DP role-local approximation: the engine scores role-local units during search, so cross-role aggregates (global regularness average, cross-role mates) are approximated in pruning; final teams can be ~0.1% below the true optimum of the stated formula. Accepted.
+
 ### Precompute optimal teams per team state
 
 **Context:** During live auctions the FE repeatedly calls `POST /api/teams/getOptimal`; the first call for a state pays the full DP cost (~0.8-1.5s). Goal: always keep the optimal team precomputed for each team's current state and re-trigger on state changes (e.g. a player is added/removed from the team).
@@ -189,6 +207,8 @@ Reference: `docs/performance-improvements.md`
 
 | Date | Item | Status |
 |------|------|--------|
+| 2026-08-24 | Scoring engine rework: `StrategyWeights` (defaults = legacy), graduated same-club penalty, goal-bonus rework (value + price uplift, per-league toggle `PUT /api/leagues/{id}/goal-bonus`), format-aware + adjusted league market endpoint (`?starters=N`, `baseExpectedPrice`) | DONE |
+| 2026-08-23 | Precompute optimal teams per team state (`TeamPrecomputer`, base-state fast path) | DONE |
 | 2026-08-23 | 26-27 per-format contract: `Player.Integrity`, `PlayerPrice` table, multi-file import, format-aware suggestion pricing | DONE |
 | 2026-08-10 | Suggestion engine caching Phase 1 + uniform scoring | DONE (`2f97eba`) |
 | 2026-08-10 | Suggestion engine refactoring (math fixes + architecture) | DONE |

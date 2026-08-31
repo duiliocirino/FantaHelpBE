@@ -30,6 +30,27 @@ namespace Fantahelp.API.Controllers
             return Ok(leagueReadDto);
         }
 
+        /// <summary>
+        /// Toggles the league's per-role goal bonus (GK 6 / DEF 5 / MID 4 / ATT 3 per goal).
+        /// When on, the engine adjusts both the effective player values and the expected
+        /// market prices (D +10%, C +5%) and the league-scoped player endpoint reports them.
+        /// </summary>
+        [HttpPut("{leagueId}/goal-bonus")]
+        public async Task<ActionResult<LeagueReadDto>> SetGoalBonus(int leagueId, [FromBody] LeagueGoalBonusUpdateDto leagueGoalBonusUpdateDto)
+        {
+            var result = await _leagueService.SetGoalBonusAsync(leagueId, leagueGoalBonusUpdateDto.GoalBonusPerRole);
+
+            if (result.Success != true)
+                return NotFound();
+
+            var league = result.Data;
+            if (league == null)
+                return NoContent();
+
+            var leagueReadDto = LeagueMapper.ToReadDto(league);
+            return Ok(leagueReadDto);
+        }
+
         [HttpDelete("{leagueId}")]
         public async Task<ActionResult<bool>> DeleteLeague(int leagueId)
         {
@@ -122,29 +143,43 @@ namespace Fantahelp.API.Controllers
             return Ok(teamDtos);
         }
 
+        /// <summary>
+        /// League-scoped market view: available players with the same price format the
+        /// suggestion engine resolves for this league (credits from the league budget,
+        /// starters from the optional query param) and the league's goal-bonus adjustment
+        /// applied to expected price/std/performance. <c>baseExpectedPrice</c> exposes the
+        /// raw ML estimate before the adjustment.
+        /// </summary>
         [HttpGet("{idLeague}/players")]
-        public async Task<ActionResult<IEnumerable<PlayerReadDto>?>> GetAllAvailablePlayers(int idLeague)
+        public async Task<ActionResult<IEnumerable<PlayerReadDto>?>> GetAllAvailablePlayers(int idLeague, [FromQuery] int? starters)
         {
-            var result = await _leagueService.GetAllAvailablePlayersAsync(idLeague);
+            var result = await _leagueService.GetLeagueMarketDataAsync(idLeague, starters);
             if (result.Success != true)
                 return NotFound();
-            var players = result.Data;
-            if (players == null)
+            var market = result.Data;
+            if (market == null)
                 return NoContent();
-            var playerDtos = players.Select(p => new PlayerReadDto
+            var playerDtos = market.Players.Select(p =>
             {
-                Id = p.Id,
-                Name = p.Name,
-                Squad = p.Squad,
-                Role = p.Role,
-                Price = p.Price,
-                Rating = p.Rating,
-                Regularness = p.Regularness,
-                Integrity = p.Integrity,
-                FVM = p.FVM,
-                ExpectedPerformance = p.ExpectedPerformance,
-                ExpectedStd = p.ExpectedStd,
-                ExpectedPrice = p.ExpectedPrice
+                var (basePrice, baseStd) = market.PriceLookup != null && market.PriceLookup.TryGetValue(p.Id, out var pp)
+                    ? (pp.Price, pp.Std)
+                    : ((int)p.ExpectedPrice, p.ExpectedStd);
+                return new PlayerReadDto
+                {
+                    Id = p.Id,
+                    Name = p.Name,
+                    Squad = p.Squad,
+                    Role = p.Role,
+                    Price = p.Price,
+                    Rating = p.Rating,
+                    Regularness = p.Regularness,
+                    Integrity = p.Integrity,
+                    FVM = p.FVM,
+                    ExpectedPerformance = ScoringEngine.EffectiveExpectedPerformance(p.ExpectedPerformance, p.Role, market.League),
+                    ExpectedStd = ScoringEngine.EffectivePriceStd(baseStd, p.Role, market.League),
+                    ExpectedPrice = ScoringEngine.EffectiveMarketPrice(basePrice, p.Role, market.League),
+                    BaseExpectedPrice = basePrice
+                };
             });
             return Ok(playerDtos);
         }
