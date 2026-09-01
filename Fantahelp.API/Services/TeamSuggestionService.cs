@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using Fantahelp.API.Services.Helpers;
@@ -12,16 +13,24 @@ namespace Fantahelp.API.Services
         private readonly FantahelpContext _context;
         private readonly ILeagueService _leagueService;
         private readonly ITeamPrecomputer _precomputer;
+        private readonly IOptimalScenarioCache _scenarioCache;
         private readonly ILogger<TeamSuggestionService> _logger;
         private readonly IMemoryCache _cache;
 
-        private const int CacheCapacity = 25;
+        private static readonly ConcurrentDictionary<string, Lazy<RoleValueTable>> InflightDpComputations = new();
 
-        public TeamSuggestionService(FantahelpContext context, ILeagueService leagueService, ITeamPrecomputer precomputer, ILogger<TeamSuggestionService> logger, IMemoryCache cache)
+        public TeamSuggestionService(
+            FantahelpContext context,
+            ILeagueService leagueService,
+            ITeamPrecomputer precomputer,
+            IOptimalScenarioCache scenarioCache,
+            ILogger<TeamSuggestionService> logger,
+            IMemoryCache cache)
         {
             _context = context;
             _leagueService = leagueService;
             _precomputer = precomputer;
+            _scenarioCache = scenarioCache;
             _logger = logger;
             _cache = cache;
         }
@@ -60,16 +69,12 @@ namespace Fantahelp.API.Services
             // --- PRECOMPUTE FAST PATH ---
             // Base-state requests (no auctioned player) return the precomputed result when
             // the team state (roster + params + player-data version) is unchanged.
-            string? resultCacheKey = null;
-            if (suggestionRequest.AuctionedPlayer == null)
+            string resultCacheKey = BuildResultCacheKey(team, suggestionRequest);
+            var cachedBaseResult = _precomputer.GetCachedResult(resultCacheKey);
+            if (suggestionRequest.AuctionedPlayer == null && cachedBaseResult != null)
             {
-                resultCacheKey = BuildResultCacheKey(team, suggestionRequest);
-                var cached = _precomputer.GetCachedResult(resultCacheKey);
-                if (cached != null)
-                {
-                    _logger.LogInformation("Returning precomputed optimal team for team {TeamId}.", team.Id);
-                    return ServiceResult<List<SuggestionResult>>.SuccessResult([cached]);
-                }
+                _logger.LogInformation("Returning precomputed optimal team for team {TeamId}.", team.Id);
+                return ServiceResult<List<SuggestionResult>>.SuccessResult([cachedBaseResult]);
             }
 
             // --- PRICE FORMAT RESOLUTION ---
@@ -92,8 +97,23 @@ namespace Fantahelp.API.Services
             var availablePlayers = (availablePlayersResult.Data ?? []).ToList();
 
             // --- 1. BASE SUGGESTION TASK ---
-            _logger.LogInformation("Starting base team suggestion.");
-            var baseTask = ComputeSingleSuggestionAsync(currentPlayers, availablePlayers, team, playerLookup, suggestionRequest, priceLookup, priceFormat);
+            Task<SuggestionResult> baseTask;
+            if (cachedBaseResult != null)
+            {
+                _logger.LogDebug("Reusing precomputed base team for team {TeamId}.", team.Id);
+                baseTask = Task.FromResult(cachedBaseResult);
+            }
+            else
+            {
+                _logger.LogInformation("Starting base team suggestion.");
+                baseTask = _scenarioCache.GetOrCreateAsync(resultCacheKey, async () =>
+                {
+                    var result = await ComputeSingleSuggestionAsync(
+                        currentPlayers, availablePlayers, team, playerLookup, suggestionRequest, priceLookup, priceFormat);
+                    _precomputer.StoreResult(team.Id, resultCacheKey, suggestionRequest, result);
+                    return result;
+                });
+            }
 
             // --- 2. POTENTIAL & WITHOUT PLAYER SUGGESTION TASKS (if auctioned player is provided) ---
             Task<SuggestionResult?> potentialTask = Task.FromResult<SuggestionResult?>(null);
@@ -125,9 +145,12 @@ namespace Fantahelp.API.Services
 
                         var potentialCurrentPlayers = new List<ScoringPlayer>(currentPlayers) { forcedScoringPlayer };
 
-                        potentialTask = ComputeSingleSuggestionAsync(
-                            potentialCurrentPlayers, excludedAvailablePlayers, team, playerLookup, suggestionRequest, priceLookup, priceFormat, forcedScoringPlayer)
-                            .ContinueWith(t => (SuggestionResult?)t.Result);
+                        potentialTask = GetCachedScenarioAsync(
+                            BuildScenarioCacheKey(resultCacheKey, "potential", forcedPlayer.Id,
+                                suggestionRequest.AuctionedPlayer.AcquisitionPrice),
+                            () => ComputeSingleSuggestionAsync(
+                                potentialCurrentPlayers, excludedAvailablePlayers, team, playerLookup,
+                                suggestionRequest, priceLookup, priceFormat, forcedScoringPlayer));
                     }
                     else
                     {
@@ -139,9 +162,11 @@ namespace Fantahelp.API.Services
                     _logger.LogInformation("Starting without-player team suggestion (excluding {Name} from market).",
                         forcedPlayer.Name);
 
-                    withoutTask = ComputeSingleSuggestionAsync(
-                        currentPlayers, excludedAvailablePlayers, team, playerLookup, suggestionRequest, priceLookup, priceFormat, forcedPlayer: null)
-                        .ContinueWith(t => (SuggestionResult?)t.Result);
+                    withoutTask = GetCachedScenarioAsync(
+                        BuildScenarioCacheKey(resultCacheKey, "without", forcedPlayer.Id),
+                        () => ComputeSingleSuggestionAsync(
+                            currentPlayers, excludedAvailablePlayers, team, playerLookup,
+                            suggestionRequest, priceLookup, priceFormat, forcedPlayer: null));
                 }
                 else
                 {
@@ -152,14 +177,14 @@ namespace Fantahelp.API.Services
             // Execute all computations concurrently
             await Task.WhenAll((Task)baseTask, (Task)potentialTask, (Task)withoutTask);
 
-            var baseResult = await baseTask;
+            var baseResult = CloneSuggestionResult(await baseTask);
             var potentialResult = await potentialTask;
             var withoutResult = await withoutTask;
 
             // --- PRECOMPUTE STORE ---
-            // Only base-state runs are cached; auctioned runs attach Potential/Without scores
-            // in-place, which must never leak into a cached base result.
-            if (suggestionRequest.AuctionedPlayer == null && resultCacheKey != null)
+            // Base results are cached independently; auctioned enrichment is applied only
+            // to a defensive copy so it cannot leak into the cached base result.
+            if (suggestionRequest.AuctionedPlayer == null)
                 _precomputer.StoreResult(team.Id, resultCacheKey, suggestionRequest, baseResult);
 
             if (potentialResult != null)
@@ -195,8 +220,8 @@ namespace Fantahelp.API.Services
         /// </summary>
         private string BuildResultCacheKey(Team team, SuggestionRequest request)
         {
-            var roster = string.Join(",", team.Players.Select(tp => tp.PlayerId).OrderBy(id => id));
-            var favorites = string.Join(",", request.FavoritePlayerIds.OrderBy(id => id));
+            var roster = string.Join(",", team.Players.Select(tp => $"{tp.PlayerId}:{tp.AuctionPrice}"));
+            var favorites = string.Join(",", request.FavoritePlayerIds);
             var lineup = request.LineUp;
             var allocation = request.BudgetAllocation is { } a
                 ? $"{a.Goalkeepers}|{a.Defenders}|{a.Midfielders}|{a.Attackers}"
@@ -218,6 +243,38 @@ namespace Fantahelp.API.Services
             return $"optimal:{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload))[..16]).ToLowerInvariant()}";
         }
 
+        private static string BuildScenarioCacheKey(
+            string baseResultCacheKey,
+            string scenario,
+            int playerId,
+            int? acquisitionPrice = null)
+        {
+            var priceKey = acquisitionPrice?.ToString() ?? "none";
+            return $"{scenario}:{baseResultCacheKey}:{playerId}:{priceKey}";
+        }
+
+        private async Task<SuggestionResult?> GetCachedScenarioAsync(
+            string cacheKey,
+            Func<Task<SuggestionResult>> factory)
+            => await _scenarioCache.GetOrCreateAsync(cacheKey, factory);
+
+        private static SuggestionResult CloneSuggestionResult(SuggestionResult source)
+        {
+            return new SuggestionResult
+            {
+                SuggestedPlayers = source.SuggestedPlayers.ToList(),
+                TotalExpectedPrice = source.TotalExpectedPrice,
+                TotalExpectedPriceStd = source.TotalExpectedPriceStd,
+                Score = new Score
+                {
+                    StarterScore = source.Score.StarterScore,
+                    BenchScore = source.Score.BenchScore,
+                    PenaltyScore = source.Score.PenaltyScore,
+                    TotalScore = source.Score.TotalScore
+                }
+            };
+        }
+
         /// <summary>
         /// Unified calculation pipeline for team suggestions.
         /// Reused identically for both base and potential runs.
@@ -235,6 +292,9 @@ namespace Fantahelp.API.Services
             var budgetSpentPerRole = ComputeBudgetSpentPerRole(team, forcedPlayer);
             var playersToBuy = ComputePlayersToBuy(currentPlayers);
             var availablePlayersByRole = BuildAvailableByRole(availablePlayers, priceLookup, team.League);
+            var scoringContext = new ScoringContext(
+                currentPlayers.Concat(availablePlayersByRole.Values.SelectMany(players => players)),
+                suggestionRequest.Weights ?? new StrategyWeights());
 
             var baseCapsPerRole = ComputeMaxBudgetsPerRole(team.League.InitialBudget, budgetSpentPerRole, suggestionRequest);
 
@@ -259,7 +319,8 @@ namespace Fantahelp.API.Services
                     league:     team.League,
                     currentPlayers: currentPlayers,
                     forcedPlayer: forcedPlayer,
-                    priceFormat: priceFormat)),
+                    priceFormat: priceFormat,
+                    scoringContext: scoringContext)),
                 Task.Run(() => PrecomputeRoleValues(
                     players:    availablePlayersByRole["D"],
                     slots:      playersToBuy["D"],
@@ -268,7 +329,8 @@ namespace Fantahelp.API.Services
                     league:     team.League,
                     currentPlayers: currentPlayers,
                     forcedPlayer: forcedPlayer,
-                    priceFormat: priceFormat)),
+                    priceFormat: priceFormat,
+                    scoringContext: scoringContext)),
                 Task.Run(() => PrecomputeRoleValues(
                     players:    availablePlayersByRole["C"],
                     slots:      playersToBuy["C"],
@@ -277,7 +339,8 @@ namespace Fantahelp.API.Services
                     league:     team.League,
                     currentPlayers: currentPlayers,
                     forcedPlayer: forcedPlayer,
-                    priceFormat: priceFormat)),
+                    priceFormat: priceFormat,
+                    scoringContext: scoringContext)),
                 Task.Run(() => PrecomputeRoleValues(
                     players:    availablePlayersByRole["A"],
                     slots:      playersToBuy["A"],
@@ -286,7 +349,8 @@ namespace Fantahelp.API.Services
                     league:     team.League,
                     currentPlayers: currentPlayers,
                     forcedPlayer: forcedPlayer,
-                    priceFormat: priceFormat))
+                    priceFormat: priceFormat,
+                    scoringContext: scoringContext))
             };
 
             var results = await Task.WhenAll(stage1Tasks);
@@ -311,7 +375,8 @@ namespace Fantahelp.API.Services
                 scoreableLookup: scoreableLookup,
                 league: team.League,
                 capsPerRole: capsPerRoleAdjusted,
-                priceLookup: priceLookup
+                priceLookup: priceLookup,
+                scoringContext: scoringContext
             );
         }
 
@@ -326,7 +391,8 @@ namespace Fantahelp.API.Services
             Dictionary<int, ScoringPlayer> scoreableLookup,
             League league,
             Dictionary<string, int> capsPerRole,
-            Dictionary<int, (int Price, double Std)>? priceLookup)
+            Dictionary<int, (int Price, double Std)>? priceLookup,
+            ScoringContext scoringContext)
         {
             var finalCombination = CombineRoleResults(
                 roleValueTables: roleValueTables,
@@ -336,7 +402,8 @@ namespace Fantahelp.API.Services
                 totalBudget: totalBudget,
                 suggestionRequest: suggestionRequest,
                 league: league,
-                capsPerRole: capsPerRole
+                capsPerRole: capsPerRole,
+                scoringContext: scoringContext
             );
 
             var results = BacktrackToGetTeams(
@@ -480,11 +547,13 @@ namespace Fantahelp.API.Services
             SuggestionRequest suggestionRequest,
             League league,
             List<ScoringPlayer> currentPlayers,
-            ScoringPlayer? forcedPlayer = null,
-            (int Credits, int Starters)? priceFormat = null)
+            ScoringPlayer? forcedPlayer,
+            (int Credits, int Starters)? priceFormat,
+            ScoringContext scoringContext)
         {
             string role = players.Count > 0 ? players[0].Role : string.Empty;
             var currentRoleMates = currentPlayers.Where(p => p.Role == role).ToList();
+            bool applyForcedPlayer = forcedPlayer != null && role == forcedPlayer.Role;
 
             // --- CACHE LOOKUP ---
             var cacheKey = BuildDpCacheKey(
@@ -492,14 +561,16 @@ namespace Fantahelp.API.Services
                 rolePlayerIds: players.Select(p => p.Id).ToList(),
                 slots: slots,
                 maxBudget: maxBudget,
-                forcedPlayerId: forcedPlayer?.Id,
-                currentRoleMateIds: currentRoleMates.Select(p => p.Id).ToList(),
+                forcedPlayerId: applyForcedPlayer ? forcedPlayer!.Id : null,
+                currentRoleMates: currentRoleMates.Select(p => (p.Id, p.AcquisitionCost)).ToList(),
+                forcedPlayerAcquisitionCost: applyForcedPlayer ? forcedPlayer!.AcquisitionCost : null,
                 lineup: suggestionRequest.LineUp,
                 creditsDistribution: suggestionRequest.CreditsDistribution,
                 budgetAllocation: suggestionRequest.BudgetAllocation,
                 priceFormat: priceFormat,
                 weights: suggestionRequest.Weights,
-                goalBonus: league.GoalBonusPerRole
+                goalBonus: league.GoalBonusPerRole,
+                dataVersion: _precomputer.DataVersion
             );
 
             if (_cache.TryGetValue(cacheKey, out RoleValueTable? cached))
@@ -512,11 +583,60 @@ namespace Fantahelp.API.Services
             _logger.LogDebug("[Cache miss] Role={Role} Slots={Slots} Budget={Budget}",
                 cacheKey.Split(':')[1], slots, maxBudget);
 
+            var computation = InflightDpComputations.GetOrAdd(
+                cacheKey,
+                _ => new Lazy<RoleValueTable>(
+                    () => ComputeRoleValues(
+                        cacheKey,
+                        role,
+                        players,
+                        slots,
+                        maxBudget,
+                        suggestionRequest,
+                        currentRoleMates,
+                        forcedPlayer,
+                        applyForcedPlayer,
+                        scoringContext),
+                    LazyThreadSafetyMode.ExecutionAndPublication));
+
+            try
+            {
+                return computation.Value;
+            }
+            finally
+            {
+                if (InflightDpComputations.TryGetValue(cacheKey, out var current)
+                    && ReferenceEquals(current, computation))
+                {
+                    InflightDpComputations.TryRemove(cacheKey, out _);
+                }
+            }
+        }
+
+        private RoleValueTable ComputeRoleValues(
+            string cacheKey,
+            string role,
+            List<ScoringPlayer> players,
+            int slots,
+            int maxBudget,
+            SuggestionRequest suggestionRequest,
+            List<ScoringPlayer> currentRoleMates,
+            ScoringPlayer? forcedPlayer,
+            bool applyForcedPlayer,
+            ScoringContext scoringContext)
+        {
             // --- DP COMPUTATION ---
             RoleValueTable roleValueTable = new() { };
             var playerById = players.ToDictionary(p => p.Id);
-
-            bool applyForcedPlayer = forcedPlayer != null && role == forcedPlayer.Role;
+            // Transition memo: key is (previous selection, added player). The list part is
+            // deliberately compared by REFERENCE (List<int> has no value equality): the
+            // dense table shares one PlayerSelectionResult object across the budget cells
+            // that hold the same selection (gap fill copies the reference), so identical
+            // selections are the same object and dedup is exact. Different objects always
+            // mean different transitions (miss = recompute, never a wrong result).
+            var transitionCache = new Dictionary<(List<int>? PreviousPlayerIds, int PlayerId), PlayerSelectionResult?>();
+            int transitionEvaluationCount = 0;
+            int transitionReuseCount = 0;
 
             for (int k = 1; k <= slots; k++)
             {
@@ -528,40 +648,64 @@ namespace Fantahelp.API.Services
                             continue;
 
                         var prevSelection = roleValueTable.GetPlayerSelection(k - 1, b - player.AcquisitionCost);
-                        List<ScoringPlayer> candidatePlayers;
-                        if (prevSelection != null)
-                            candidatePlayers = prevSelection.PlayerIds
+                        if (prevSelection == null && k != 1)
+                            continue;
+
+                        var transitionKey = (prevSelection?.PlayerIds, player.Id);
+                        if (!transitionCache.TryGetValue(transitionKey, out var candidateSelection))
+                        {
+                            transitionEvaluationCount++;
+                            if (prevSelection?.PlayerIds.Contains(player.Id) == true)
+                            {
+                                transitionCache[transitionKey] = null;
+                                continue;
+                            }
+
+                            var candidatePlayerIds = prevSelection != null
+                                ? new List<int>(prevSelection.PlayerIds)
+                                : new List<int>();
+                            candidatePlayerIds.Add(player.Id);
+
+                            // Score against the full role unit: candidates + current mates + forced player
+                            var evalPlayers = candidatePlayerIds
                                 .Select(id => playerById[id])
                                 .ToList();
-                        else if (k == 1 && b >= player.AcquisitionCost)
-                            candidatePlayers = new List<ScoringPlayer>();
+                            evalPlayers.AddRange(currentRoleMates);
+                            if (applyForcedPlayer)
+                                evalPlayers.Add(forcedPlayer!);
+
+                            candidateSelection = new PlayerSelectionResult
+                            {
+                                Score = ScoringEngine.CalculateScore(evalPlayers, suggestionRequest, scoringContext),
+                                PlayerIds = candidatePlayerIds
+                            };
+                            transitionCache[transitionKey] = candidateSelection;
+                        }
                         else
+                        {
+                            transitionReuseCount++;
+                        }
+
+                        if (candidateSelection == null)
                             continue;
-
-                        if (candidatePlayers.Any(p => p.Id == player.Id))
-                            continue;
-
-                        candidatePlayers.Add(player);
-
-                        // Score against the full role unit: candidates + current mates + forced player
-                        var evalPlayers = new List<ScoringPlayer>(candidatePlayers);
-                        evalPlayers.AddRange(currentRoleMates);
-                        if (applyForcedPlayer)
-                            evalPlayers.Add(forcedPlayer!);
-
-                        var score = ScoringEngine.CalculateScore(evalPlayers, suggestionRequest);
 
                         var currentSelection = roleValueTable.GetPlayerSelection(k, b);
-                        if (currentSelection == null || score.TotalScore > currentSelection.Score.TotalScore)
+                        if (currentSelection == null || candidateSelection.Score.TotalScore > currentSelection.Score.TotalScore)
                         {
                             roleValueTable.SetPlayerSelection(
                                 k, b,
-                                score,
-                                candidatePlayers.Select(p => p.Id).ToList());
+                                candidateSelection.Score,
+                                candidateSelection.PlayerIds);
                         }
                     }
                 }
             }
+
+            _logger.LogDebug(
+                "[Stage 1 dedup] Role={Role} UniqueTransitions={UniqueTransitions} ReusedTransitions={ReusedTransitions}",
+                role,
+                transitionEvaluationCount,
+                transitionReuseCount);
 
             for (int k = 1; k <= slots; k++)
             {
@@ -594,7 +738,8 @@ namespace Fantahelp.API.Services
             int totalBudget,
             SuggestionRequest suggestionRequest,
             League league,
-            Dictionary<string, int> capsPerRole)
+            Dictionary<string, int> capsPerRole,
+            ScoringContext scoringContext)
         {
             FinalCombinationResult finalTable = new FinalCombinationResult {};
 
@@ -636,36 +781,79 @@ namespace Fantahelp.API.Services
                 if (prevSelections.Count == 0)
                     continue;
 
-                foreach (var curr in currTable)
+                var currEntries = AssignSelectionIds(currTable);
+                var prevEntries = AssignSelectionIds(prevSelections);
+                var evaluationCache = new Dictionary<(int PreviousSelectionId, int CurrentSelectionId), PlayerSelectionResult>();
+                int feasiblePairCount = 0;
+
+                foreach (var curr in currEntries)
                 {
-                    foreach (var prev in prevSelections)
+                    foreach (var prev in prevEntries)
                     {
-                        int newBudget = prev.Key + curr.Key;
+                        int newBudget = prev.Budget + curr.Budget;
                         if (newBudget > totalBudget)
                             continue;
 
-                        var newIds = prev.Value.PlayerIds
-                                        .Concat(curr.Value.PlayerIds)
-                                        .ToList();
-                        List<ScoringPlayer> selectedPlayers = newIds
-                            .Where(scoreableLookup.ContainsKey)
-                            .Select(id => scoreableLookup[id])
-                            .ToList();
+                        feasiblePairCount++;
+                        var evaluationKey = (prev.SelectionId, curr.SelectionId);
+                        if (!evaluationCache.TryGetValue(evaluationKey, out var evaluation))
+                        {
+                            var newIds = prev.Selection.PlayerIds
+                                .Concat(curr.Selection.PlayerIds)
+                                .ToList();
+                            List<ScoringPlayer> selectedPlayers = newIds
+                                .Where(scoreableLookup.ContainsKey)
+                                .Select(id => scoreableLookup[id])
+                                .ToList();
 
-                        Score newScore = ScoringEngine.CalculateScore(selectedPlayers, suggestionRequest);
+                            evaluation = new PlayerSelectionResult
+                            {
+                                Score = ScoringEngine.CalculateScore(selectedPlayers, suggestionRequest, scoringContext),
+                                PlayerIds = newIds
+                            };
+                            evaluationCache[evaluationKey] = evaluation;
+                        }
+
                         Score lastScore = finalTable.GetPlayerSelection(t, newBudget)?.Score ?? new Score { TotalScore = double.MinValue };
 
-                        if (newScore.TotalScore > lastScore.TotalScore)
+                        if (evaluation.Score.TotalScore > lastScore.TotalScore)
                             finalTable.SetPlayerSelection(
                                 roleNum: t,
                                 budget: newBudget,
-                                score: newScore,
-                                playerIds: newIds);
+                                score: evaluation.Score,
+                                playerIds: evaluation.PlayerIds);
                     }
                 }
+
+                _logger.LogDebug(
+                    "[Combination dedup] Role={Role} FeasiblePairs={FeasiblePairs} UniqueEvaluations={UniqueEvaluations}",
+                    role,
+                    feasiblePairCount,
+                    evaluationCache.Count);
             }
 
             return finalTable;
+        }
+
+        private static List<(int Budget, PlayerSelectionResult Selection, int SelectionId)> AssignSelectionIds(
+            Dictionary<int, PlayerSelectionResult> selections)
+        {
+            var selectionIds = new Dictionary<string, int>(StringComparer.Ordinal);
+            var entries = new List<(int Budget, PlayerSelectionResult Selection, int SelectionId)>(selections.Count);
+
+            foreach (var entry in selections)
+            {
+                var selectionKey = string.Join(',', entry.Value.PlayerIds);
+                if (!selectionIds.TryGetValue(selectionKey, out int selectionId))
+                {
+                    selectionId = selectionIds.Count;
+                    selectionIds[selectionKey] = selectionId;
+                }
+
+                entries.Add((entry.Key, entry.Value, selectionId));
+            }
+
+            return entries;
         }
 
         private List<SuggestionResult> BacktrackToGetTeams(FinalCombinationResult finalCombination, Dictionary<int, Player> playerLookup, int numTeams, Dictionary<int, (int Price, double Std)>? priceLookup, League league)
@@ -736,19 +924,23 @@ namespace Fantahelp.API.Services
             int slots,
             int maxBudget,
             int? forcedPlayerId,
-            IReadOnlyList<int> currentRoleMateIds,
+            IReadOnlyList<(int Id, int AcquisitionCost)> currentRoleMates,
+            int? forcedPlayerAcquisitionCost,
             LineUp lineup,
             int creditsDistribution,
             BudgetAllocation? budgetAllocation,
             (int Credits, int Starters)? priceFormat,
             StrategyWeights? weights,
-            bool goalBonus)
+            bool goalBonus,
+            long dataVersion)
         {
             // Deterministic hash from sorted player IDs
             var hash = rolePlayerIds.OrderBy(id => id).Aggregate(0L, (h, id) => h ^ (id.GetHashCode() * 31L));
-            var matesHash = currentRoleMateIds.OrderBy(id => id).Aggregate(0L, (h, id) => h ^ (id.GetHashCode() * 31L));
             var lineupKey = $"{lineup.Defenders}-{lineup.Midfielders}-{lineup.Attackers}";
-            var forcedKey = forcedPlayerId ?? -1;
+            var forcedKey = forcedPlayerId.HasValue
+                ? $"{forcedPlayerId.Value}:{forcedPlayerAcquisitionCost ?? 0}"
+                : "none";
+            var matesKey = string.Join(',', currentRoleMates.Select(mate => $"{mate.Id}:{mate.AcquisitionCost}"));
             var allocKey = budgetAllocation != null
                 ? $"{budgetAllocation.Goalkeepers:F2}-{budgetAllocation.Defenders:F2}-{budgetAllocation.Midfielders:F2}-{budgetAllocation.Attackers:F2}"
                 : "default";
@@ -758,7 +950,7 @@ namespace Fantahelp.API.Services
             var formatKey = priceFormat == null ? "legacy" : $"{priceFormat.Value.Credits}_{priceFormat.Value.Starters}";
             var weightsKey = (weights ?? new StrategyWeights()).Signature;
             var bonusKey = goalBonus ? "gb" : "nobb";
-            return $"dp:{role}:{hash}:{slots}:{maxBudget}:{forcedKey}:{matesHash}:{lineupKey}:{creditsDistribution}:{allocKey}:{formatKey}:{weightsKey}:{bonusKey}";
+            return $"dp:{role}:v{dataVersion}:{hash}:{slots}:{maxBudget}:{forcedKey}:{matesKey}:{lineupKey}:{creditsDistribution}:{allocKey}:{formatKey}:{weightsKey}:{bonusKey}";
         }
 
         /// <summary>

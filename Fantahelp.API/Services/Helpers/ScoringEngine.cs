@@ -66,14 +66,24 @@ namespace Fantahelp.API.Services
         };
 
         public static Score CalculateScore(List<ScoringPlayer> players, SuggestionRequest suggestionRequest)
+            => CalculateScore(players, suggestionRequest, null);
+
+        internal static Score CalculateScore(
+            List<ScoringPlayer> players,
+            SuggestionRequest suggestionRequest,
+            ScoringContext? scoringContext)
         {
             var weights = suggestionRequest.Weights ?? new StrategyWeights();
+
+            if (scoringContext != null)
+                return CalculateScoreFast(players, suggestionRequest, scoringContext, weights);
 
             // Starters/bench split per role by reliable value V (consistent with the
             // objective the DP optimizes).
             var playersByRole = players
                 .GroupBy(p => p.Role)
-                .ToDictionary(g => g.Key, g => g.OrderByDescending(p => ReliableValue(p, weights)).ToList());
+                .ToDictionary(g => g.Key, g => g.OrderByDescending(p =>
+                    scoringContext?.GetReliableValue(p) ?? ReliableValue(p, weights)).ToList());
 
             List<ScoringPlayer> starters = [];
             List<ScoringPlayer> subs = [];
@@ -104,8 +114,8 @@ namespace Fantahelp.API.Services
                 }
             }
 
-            double startingScore = ComputeStarterContribution(starters, suggestionRequest.LineUp, weights);
-            double subsScore = ComputeSubContribution(subs, weights);
+            double startingScore = ComputeStarterContribution(starters, suggestionRequest.LineUp, weights, scoringContext);
+            double subsScore = ComputeSubContribution(subs, weights, scoringContext);
             double strategyScore = ComputeStrategiesScore(starters, subs, suggestionRequest, weights);
 
             return new Score
@@ -119,7 +129,262 @@ namespace Fantahelp.API.Services
             };
         }
 
-        private static double ComputeStarterContribution(List<ScoringPlayer> players, LineUp lineUp, StrategyWeights weights)
+            private static Score CalculateScoreFast(
+                List<ScoringPlayer> players,
+                SuggestionRequest suggestionRequest,
+                ScoringContext scoringContext,
+                StrategyWeights weights)
+            {
+                var playersByRole = new List<ScoringPlayer>[4]
+                {
+                    [], [], [], []
+                };
+
+                foreach (var player in players)
+                {
+                    var roleIndex = player.Role switch
+                    {
+                        "P" => 0,
+                        "D" => 1,
+                        "C" => 2,
+                        "A" => 3,
+                        _ => -1
+                    };
+
+                    if (roleIndex >= 0)
+                        playersByRole[roleIndex].Add(player);
+                }
+
+                foreach (var rolePlayers in playersByRole)
+                    StableSortByReliableValue(rolePlayers, scoringContext);
+
+                var starters = new List<ScoringPlayer>(players.Count);
+                var subs = new List<ScoringPlayer>(players.Count);
+                var starterCounts = new[]
+                {
+                    1,
+                    suggestionRequest.LineUp.Defenders,
+                    suggestionRequest.LineUp.Midfielders,
+                    suggestionRequest.LineUp.Attackers
+                };
+
+                for (int roleIndex = 0; roleIndex < playersByRole.Length; roleIndex++)
+                {
+                    var rolePlayers = playersByRole[roleIndex];
+                    if (rolePlayers.Count == 0)
+                        continue;
+
+                    int starterCount = starterCounts[roleIndex];
+                    if (starterCount > 0 && rolePlayers.Count >= starterCount)
+                    {
+                        for (int playerIndex = 0; playerIndex < starterCount; playerIndex++)
+                            starters.Add(rolePlayers[playerIndex]);
+                        for (int playerIndex = starterCount; playerIndex < rolePlayers.Count; playerIndex++)
+                            subs.Add(rolePlayers[playerIndex]);
+                    }
+                    else
+                    {
+                        starters.AddRange(rolePlayers);
+                    }
+                }
+
+                double startingScore = ComputeStarterContributionFast(
+                    starters, suggestionRequest.LineUp, scoringContext);
+                double subsScore = ComputeSubContributionFast(subs, scoringContext);
+                double strategyScore = ComputeStrategiesScoreFast(
+                    starters, subs, suggestionRequest, weights);
+
+                return new Score
+                {
+                    StarterScore = startingScore,
+                    BenchScore = subsScore,
+                    PenaltyScore = strategyScore,
+                    TotalScore = (weights.StarterWeight * startingScore
+                                + weights.BenchWeight * subsScore
+                                + weights.StrategyWeight * strategyScore) / 10.0
+                };
+            }
+
+            private static void StableSortByReliableValue(
+                List<ScoringPlayer> players,
+                ScoringContext scoringContext)
+            {
+                for (int index = 1; index < players.Count; index++)
+                {
+                    var candidate = players[index];
+                    var candidateValue = scoringContext.GetReliableValue(candidate);
+                    int previousIndex = index - 1;
+
+                    while (previousIndex >= 0
+                        && scoringContext.GetReliableValue(players[previousIndex]) < candidateValue)
+                    {
+                        players[previousIndex + 1] = players[previousIndex];
+                        previousIndex--;
+                    }
+
+                    players[previousIndex + 1] = candidate;
+                }
+            }
+
+            private static double ComputeStarterContributionFast(
+                List<ScoringPlayer> players,
+                LineUp lineUp,
+                ScoringContext scoringContext)
+            {
+                int bonusDefense = 0;
+
+                if (lineUp.Defenders >= 4)
+                {
+                    ScoringPlayer? keeper = null;
+                    ScoringPlayer? firstDefender = null;
+                    ScoringPlayer? secondDefender = null;
+                    ScoringPlayer? thirdDefender = null;
+
+                    foreach (var player in players)
+                    {
+                        if (player.Role == "P")
+                        {
+                            if (keeper == null || player.BaseExpectedPerformance > keeper.BaseExpectedPerformance)
+                                keeper = player;
+                            continue;
+                        }
+
+                        if (player.Role != "D")
+                            continue;
+
+                        if (firstDefender == null || player.BaseExpectedPerformance > firstDefender.BaseExpectedPerformance)
+                        {
+                            thirdDefender = secondDefender;
+                            secondDefender = firstDefender;
+                            firstDefender = player;
+                        }
+                        else if (secondDefender == null || player.BaseExpectedPerformance > secondDefender.BaseExpectedPerformance)
+                        {
+                            thirdDefender = secondDefender;
+                            secondDefender = player;
+                        }
+                        else if (thirdDefender == null || player.BaseExpectedPerformance > thirdDefender.BaseExpectedPerformance)
+                        {
+                            thirdDefender = player;
+                        }
+                    }
+
+                    if (keeper != null && firstDefender != null && secondDefender != null && thirdDefender != null)
+                    {
+                        // Same addition order as the reference scorer (keeper + LINQ Sum of the
+                        // three defenders) so the average is bit-identical: a 1-ULP difference
+                        // could flip the back-4 k boundary (e.g. an average of exactly 6.25).
+                        double defendersSum = firstDefender.BaseExpectedPerformance
+                            + secondDefender.BaseExpectedPerformance
+                            + thirdDefender.BaseExpectedPerformance;
+                        double averageScore = (keeper.BaseExpectedPerformance + defendersSum) / 4.0;
+                        if (averageScore >= 6)
+                            bonusDefense = (int)Math.Floor((averageScore - 6) / 0.25) + 1;
+                    }
+                }
+
+                double score = 0;
+                foreach (var player in players)
+                    score += scoringContext.GetReliableValue(player);
+                return score + bonusDefense;
+            }
+
+            private static double ComputeSubContributionFast(
+                List<ScoringPlayer> subs,
+                ScoringContext scoringContext)
+            {
+                double score = 0;
+                foreach (var player in subs)
+                    score += scoringContext.GetReliableValue(player);
+                return BenchRotationFactor * score;
+            }
+
+            private static double ComputeStrategiesScoreFast(
+                List<ScoringPlayer> starters,
+                List<ScoringPlayer> subs,
+                SuggestionRequest suggestionRequest,
+                StrategyWeights weights)
+            {
+                double startersSpreadCreditsScore = 0;
+                if (suggestionRequest.CreditsDistribution != 0 && starters.Count + subs.Count > 0)
+                {
+                    foreach (var role in Roles)
+                    {
+                        int roleCount = 0;
+                        double roleCostSum = 0;
+                        foreach (var player in starters)
+                        {
+                            if (player.Role != role)
+                                continue;
+                            roleCount++;
+                            roleCostSum += player.AcquisitionCost;
+                        }
+
+                        if (roleCount == 0)
+                            continue;
+
+                        double averageCost = roleCostSum / roleCount;
+                        double squaredDifferenceSum = 0;
+                        foreach (var player in starters)
+                        {
+                            if (player.Role != role)
+                                continue;
+                            squaredDifferenceSum += Math.Pow(player.AcquisitionCost - averageCost, 2);
+                        }
+
+                        startersSpreadCreditsScore += -0.005 * Math.Sqrt(squaredDifferenceSum / roleCount);
+                    }
+                }
+
+                var subsNames = new HashSet<string>(subs.Select(player => player.Name));
+                int mateCount = 0;
+                if (starters.Count > 0)
+                {
+                    foreach (var starter in starters)
+                    {
+                        if (!string.IsNullOrEmpty(starter.Mate) && subsNames.Contains(starter.Mate))
+                            mateCount++;
+                    }
+                }
+
+                var roleSquadCounts = new Dictionary<(string Role, string Squad), int>();
+                var squadCounts = new Dictionary<string, int>();
+                foreach (var player in starters.Concat(subs))
+                {
+                    if (player.Role == "P")
+                        continue;
+
+                    var roleSquadKey = (player.Role, player.Squad);
+                    roleSquadCounts[roleSquadKey] = roleSquadCounts.TryGetValue(roleSquadKey, out var roleCount)
+                        ? roleCount + 1
+                        : 1;
+                    squadCounts[player.Squad] = squadCounts.TryGetValue(player.Squad, out var squadCount)
+                        ? squadCount + 1
+                        : 1;
+                }
+
+                int sameClubInRole = 0;
+                foreach (var count in roleSquadCounts.Values)
+                    sameClubInRole += Math.Max(0, count - 1);
+
+                int sameClubTeamWide = 0;
+                foreach (var count in squadCounts.Values)
+                    sameClubTeamWide += Math.Max(0, count - 3);
+
+                double sameTeamScore = -weights.SquadDiversity / 5.0
+                    * (sameClubInRole + 2 * sameClubTeamWide);
+                double strategyScore = weights.MateWeight * mateCount
+                    + sameTeamScore
+                    + suggestionRequest.CreditsDistribution * startersSpreadCreditsScore;
+
+                return strategyScore;
+            }
+
+        private static double ComputeStarterContribution(
+            List<ScoringPlayer> players,
+            LineUp lineUp,
+            StrategyWeights weights,
+            ScoringContext? scoringContext)
         {
             int bonusDefense = 0;
 
@@ -152,7 +417,7 @@ namespace Fantahelp.API.Services
                 }
             }
 
-            double score = players.Sum(p => ReliableValue(p, weights)) + bonusDefense;
+            double score = players.Sum(p => scoringContext?.GetReliableValue(p) ?? ReliableValue(p, weights)) + bonusDefense;
             return score;
         }
 
@@ -164,13 +429,16 @@ namespace Fantahelp.API.Services
         /// </summary>
         private const double BenchRotationFactor = 0.5;
 
-        private static double ComputeSubContribution(List<ScoringPlayer> subs, StrategyWeights weights)
+        private static double ComputeSubContribution(
+            List<ScoringPlayer> subs,
+            StrategyWeights weights,
+            ScoringContext? scoringContext)
         {
             // Bench = rotation factor × sum of the reliable value of the bench players:
             // absolute rotation depth in expected points, correct direction under budget
             // pressure (unlike the old bench/starter ratio, which measured the pool's
             // talent curve and rose when the line got cheaper).
-            return BenchRotationFactor * subs.Sum(p => ReliableValue(p, weights));
+            return BenchRotationFactor * subs.Sum(p => scoringContext?.GetReliableValue(p) ?? ReliableValue(p, weights));
         }
 
         private static double ComputeStrategiesScore(List<ScoringPlayer> starters, List<ScoringPlayer> subs,
@@ -245,7 +513,7 @@ namespace Fantahelp.API.Services
         /// double-counting the price side. α=0 recovers pure quality-when-playing;
         /// α=1 (ReliabilityWeight 10) is the economically consistent value.
         /// </summary>
-        private static double ReliableValue(ScoringPlayer p, StrategyWeights weights)
+        internal static double ReliableValue(ScoringPlayer p, StrategyWeights weights)
         {
             double alpha = weights.ReliabilityWeight / 10.0;
             double value = p.ExpectedPerformance * Math.Pow(p.Regularness / 100.0, alpha);

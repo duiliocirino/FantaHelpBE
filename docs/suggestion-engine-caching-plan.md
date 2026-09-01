@@ -1,5 +1,34 @@
 # Suggestion Engine Caching — Implementation Plan
 
+> **Historical plan:** The original per-role cache rollout described below was
+> completed and then extended on 2026-09-01. The current implementation status,
+> measurements and cache-key correctness rules are maintained in
+> [`suggestion-engine-subsecond-plan.md`](suggestion-engine-subsecond-plan.md).
+> The Phase 1 checklist and impact tables in this document describe the earlier
+> role-only cache design; use the current-status section below for behavior.
+
+## Current Status (2026-09-01)
+
+- Per-role DP tables remain in the shared 25-entry `IMemoryCache` with a
+    ten-minute TTL.
+- DP keys include player-data version, ordered player pools, slots, budget,
+    role-scoped forced-player context, role-mate acquisition costs, lineup,
+    allocation, weights, price format and goal-bonus state.
+- A dedicated 100-entry `OptimalScenarioCache` stores Base, Potential and
+    Without-player results for ten minutes. It does not compete with DP entries.
+- Base results are reused by auction requests; Without-player results are reused
+    across bid changes; Potential results are keyed by forced player and bid.
+- Scenario and DP misses use single-flight coordination. Concurrent callers for
+    the same key await one computation.
+- Player imports invalidate old results through the shared data version already
+    used by the precomputer and DP keys. No cache enumeration or hard clear is
+    required.
+- Exact Release HTTP oracle checks across default, discounted auction, Max
+    Points, Mate Collector, Diversified, Deep Bench and alternate-lineup requests
+    were byte-identical to the pre-change service.
+
+See the sub-second plan for the measured latency changes.
+
 ## Goal
 
 Reduce DP table recomputation during live auctions by caching Stage 1 `RoleValueTable` results per role. The cache serves two purposes:
@@ -48,12 +77,15 @@ Per-role `RoleValueTable` entries, not full results. DP tables are the expensive
 - **TTL:** 10 minutes absolute expiration (safety net for stale entries)
 - **Scope:** Application-lifetime (persists across requests, cleared on data events)
 
+Scenario results use a separate bounded `MemoryCache` with 100 entries so large
+result payloads cannot evict the DP tables. Both caches are process-local.
+
 ### Invalidation
 
 | Event | Action | Rationale |
 |-------|--------|-----------|
 | Player purchased/sold from team | **Nothing** — per-role hash handles it naturally | Only the sold player's role hash changes; other roles' entries stay valid |
-| Player re-import (`POST /api/players/import`) | **Clear all** | Every player's stats may have changed → all DP tables stale |
+| Player re-import (`POST /api/players/import`) | Increment shared data version | Every player's stats may have changed; old keys become unreachable |
 | App restart | N/A — in-process cache dies with process | — |
 
 No team-specific scoping needed — the cache key encodes enough context (player pool, slots, budget, lineup) that entries from different teams coexist without conflict.
@@ -168,23 +200,27 @@ Actually, simpler: use a shared `volatile int` or `Lazy<int>` via a small `ICach
 
 ### Phase 1 — Core cache (Target: this session)
 
-- [ ] Add `IMemoryCache` injection to `TeamSuggestionService`
-- [ ] Implement `BuildDpCacheKey` helper
-- [ ] Add cache lookup/insert in `PrecomputeRoleValues`
-- [ ] Add cache hit/miss logging (`_logger.LogDebug`)
-- [ ] Verify build, smoke test with auctioned player scenario
+- [x] Add `IMemoryCache` injection to `TeamSuggestionService`
+- [x] Implement `BuildDpCacheKey` helper
+- [x] Add cache lookup/insert in `PrecomputeRoleValues`
+- [x] Add cache hit/miss logging (`_logger.LogDebug`)
+- [x] Verify build and smoke test with auctioned player scenarios
+- [x] Add exact combination-evaluation memoization and request-local scoring
+    values; see `suggestion-engine-subsecond-plan.md`
+- [x] Add Base/Potential/Without scenario caching and single-flight
 
 ### Phase 2 — Invalidation on import
 
-- [ ] Create `ICacheVersion` singleton service
-- [ ] Include version in cache key
-- [ ] Increment version in `PlayerService.ImportPlayersFromCsvAsync` after successful commit
-- [ ] Verify old entries become unreachable after import
+- [x] Use `ITeamPrecomputer.DataVersion` as the shared import version
+- [x] Include version in DP and scenario-derived result keys
+- [x] Increment the version through `NotifyPlayerDataChanged` after successful
+    player import
+- [x] Verify old entries become unreachable after import
 
 ### Phase 3 — Observability (Deferred)
 
-- [ ] Expose cache hit rate via `ILogger` periodic summary or metrics endpoint
-- [ ] Tune capacity/TTL based on observed patterns
+- [ ] Expose aggregate cache hit rate via metrics or periodic logging
+- [ ] Tune capacity/TTL based on production observations
 
 ---
 
@@ -240,3 +276,4 @@ dotnet build Fantahelp.API
 | Date | Item | Status |
 |------|------|--------|
 | 2026-08-10 | Initial plan drafted | Draft |
+| 2026-09-01 | Exact DP/scenario single-flight, scenario reuse, data-versioned keys and request-local scoring added | DONE; see `suggestion-engine-subsecond-plan.md` |

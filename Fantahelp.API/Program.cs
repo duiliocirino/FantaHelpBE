@@ -27,6 +27,7 @@ builder.Services.AddScoped<ITeamSuggestionService, TeamSuggestionService>();
 // Singleton: holds cross-request state (per-team params, data version, result cache) for
 // the optimal-team precompute. See TeamPrecomputer.
 builder.Services.AddSingleton<ITeamPrecomputer, TeamPrecomputer>();
+builder.Services.AddSingleton<IOptimalScenarioCache, OptimalScenarioCache>();
 
 builder.Services.AddMemoryCache(options =>
 {

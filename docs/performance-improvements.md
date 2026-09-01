@@ -1,5 +1,14 @@
 # Performance Improvements – TeamSuggestionService
 
+> **Historical note (2026-09-01):** This document predates the current 26-27
+> scoring model and fresh Release benchmarks. The current measured analysis,
+> exact Phase 1 optimization, five-credit search proposal and
+> interaction-aware pruning constraints are documented in
+> [`suggestion-engine-subsecond-plan.md`](suggestion-engine-subsecond-plan.md).
+> Treat that document as the implementation source of truth. In particular,
+> role-local saved-credit caps and unconditional top-K pruning are not assumed
+> to preserve the current solver's result.
+
 ## Context
 Current implementation: per-role 0/1 knapsack DP with non-additive scoring, cross-role combine, 3-path suggestion Base / Potential / WithoutPlayer.
 Typical request: 4 roles, ~130 candidates per role, maxBudget ~500, slots 3-8.

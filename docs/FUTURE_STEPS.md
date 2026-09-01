@@ -156,26 +156,31 @@ Anchors are percentage-native (starters 80% = reliable starter, subs 60% = relia
 
 ### Suggestion Engine Caching
 
-**Context:** The suggestion engine recomputes Stage 1 DP tables on every request. During live auctions, the frontend fires rapid repeated calls with overlapping team states.
+**Context:** The suggestion engine serves repeated base and auction requests during live auctions. Exact Phase 1 reuse now covers DP tables and complete scenarios.
 
 **Phase 1 — Core cache: DONE** (`2f97eba`)
 
 - `IMemoryCache` injected into `TeamSuggestionService` (capacity 25 entries, ~5 MB, 10min TTL, size-based LRU eviction)
-- Per-role `RoleValueTable` cache key: `(role, rolePlayerIdsHash, slots, maxBudget, forcedPlayerId, currentRoleMateIdsHash, lineup, creditsDistribution, budgetAllocation)`
+- Per-role `RoleValueTable` cache key includes the player-data version, role pool, slots, budget, role-scoped forced player and bid cost, role-mate acquisition costs, lineup, credits distribution, budget allocation, price format, weights and goal-bonus state
 - Per-role player hash (not global pool hash) → P/C/A entries survive when only a defender is purchased
 - Current role-mates included in Stage 1 scoring context → base and potential paths evaluate against the same role-unit composition (post-purchase score matches pre-purchase potential, gap 0.057 → 0.0007)
 - No explicit invalidation on team change — cache key encodes enough context; LRU handles eviction naturally
+- Dedicated scenario cache reuses Base, Potential and Without-player results; bid changes recalculate only Potential
+- Scenario and DP single-flight prevents concurrent identical misses from duplicating work
 
 **Impact:**
-- Within-request (3 paths): ~50% reduction (6 computed, 6 hits)
-- Across-request (post-purchase): ~75% reduction (P/C/A entries survive)
+- Warm base and auction requests are below one second on the benchmark machine
+- Repeated identical auction requests are approximately 50ms
+- Concurrent identical misses share one computation
 
-**Phase 2 — Invalidation on import: Open**
+**Phase 2 — Invalidation on import: DONE**
 
-- Create `ICacheVersion` singleton service
-- Include version in cache key
-- Increment version in `PlayerService.ImportPlayersFromCsvAsync` after successful commit
-- Plan: `docs/suggestion-engine-caching-plan.md`
+- `ITeamPrecomputer.DataVersion` is included in result and DP-derived keys
+- `PlayerService.ImportPlayersFromCsvAsync` notifies the precomputer after a successful commit
+- Old entries become unreachable after import, including when player IDs are reused
+
+Detailed measurements and the remaining cold-start work are tracked in
+[`docs/suggestion-engine-subsecond-plan.md`](suggestion-engine-subsecond-plan.md).
 
 ### Unit / Integration Tests
 
@@ -202,16 +207,32 @@ No auth is configured. Needed before exposing the API externally.
 
 ### TeamSuggestionService optimisation
 
-See `docs/performance-improvements.md` for detailed analysis, bottleneck list and proposed improvements.
+See [`docs/suggestion-engine-subsecond-plan.md`](suggestion-engine-subsecond-plan.md)
+for the current benchmarks, exact optimizations, five-credit coarse-search design,
+candidate-pruning constraints and validation rollout. The older
+[`docs/performance-improvements.md`](performance-improvements.md) is retained as
+historical context.
 
-**Status:** Tracking. No implementation yet.
+**Status:** Exact Phase 1 optimizations implemented and benchmarked.
 
 **Next steps:**
-- Apply tighter per-role budget caps
-- Candidate pruning per role
-- Score memoisation
+- Add automated regression tests and per-stage elapsed/allocation metrics
+- Validate five-credit buckets against the exact regression corpus if cold-start
+	latency below one second is required
+- Develop adaptive candidate pruning only after the exact baseline is covered
 
-Reference: `docs/performance-improvements.md`
+**Measured Release baseline (2026-09-01, empty 800-credit team, 515-player
+pool):** 9.04s cold base, 4.03s with DP tables cached, 8-36ms full-result hit,
+6.72s repeated auction request with DP tables warm.
+
+**After complete Phase 1:** 1.89-1.97s cold base, 0.45-0.55s base with DP
+tables cached, 0.49-0.62s first auction request after base precompute, and about
+50ms for a repeated identical auction. A representative base combination reused
+60,861 unique evaluations across 420,829 feasible capacity pairs (86% fewer
+complete score calculations). Scenario and DP single-flight was verified with
+two concurrent cold auction requests completing together in about 2.22s each.
+Default, discounted auction and five interaction-heavy variants were
+byte-identical to the pre-change service.
 
 ---
 
